@@ -61,7 +61,7 @@ class Database:
                 f"""
                 INSERT INTO {settings.db_schema}.items
                   (user_id, raw_text, source, parse_status, kind, state)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 RETURNING id::text
                 """,
                 (user_id, raw_text, source, parse_status, kind, state),
