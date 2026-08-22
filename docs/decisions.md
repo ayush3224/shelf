@@ -47,6 +47,46 @@ Opening to a list is what makes a system feel like a chore.
 Four swipe directions map to the four states. A deck can be finished;
 a list can't.
 
+**D11 — Auth is the Supabase JWT, and it is the only source of `user_id`.**
+The bearer token is verified with `SUPABASE_JWT_SECRET` (HS256) and the
+`sub` claim *is* the user. `DEFAULT_USER_ID` is gone — a configured
+fallback identity is a way to write rows as the wrong user and never
+notice. Auth is enforced in middleware, so it is fail-closed: every new
+route is protected unless it is added to `PUBLIC_PATHS`. `/health` is the
+only entry there.
+*Revisit if:* a route needs to be public for a reason other than liveness.
+
+**D12 — `/docs`, `/redoc` and `/openapi.json` are off.**
+Single-user private API. An unauthenticated endpoint that describes every
+route is a gift to nobody.
+*Revisit if:* a second client needs a generated schema — generate it from
+the app object offline instead of serving it.
+
+**D13 — `parse_status` starts at `failed` and is promoted to `ok`.**
+The row is written before the model call (D6), so between the insert and
+the parse the honest value is `failed`. Starting optimistic means a crash
+mid-parse leaves a row that claims it was parsed. Fail-closed is cheaper
+than an audit later (UC42).
+*Revisit if:* `needs_review` gets a real use — it's currently unused, and
+belongs to low-confidence transcription, not to failed parses.
+
+**D14 — The parse's cleaned text gets its own column.**
+`parsed_text` (migration 002), not an overwrite of `raw_text`. The raw
+capture is what UC38 edits against and UC34 searches; rewriting it means
+the user can never see what they actually said. `Today` and the review
+deck display `parsed_text` and fall back to `raw_text`. `project_hint` and
+`entities` are still returned-but-not-stored — those need UC11 and UC44.
+*Revisit if:* the fallback is never exercised, i.e. parse failures are rare
+enough that a null `parsed_text` is dead code.
+
+**D15 — Relative dates resolve against `TZ`, set to `Asia/Kolkata`.**
+The server runs in UTC and the user does not; resolving "tomorrow 3pm" in
+server time was silently five and a half hours wrong. `TZ` is read from
+`.env` (`CAPTURE_TIMEZONE` still works as an alias) and handed to the model
+as the reference time.
+*Revisit if:* captures start happening in more than one timezone — then the
+device should send its offset and the setting should go away.
+
 ---
 
 ## Open

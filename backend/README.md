@@ -39,7 +39,8 @@ python -m backend.main
 
 The API will be available at `http://localhost:8001`.
 
-Access the interactive API docs at `http://localhost:8001/docs`.
+There are no interactive docs — `/docs`, `/redoc` and `/openapi.json` are
+disabled on purpose (D12). The endpoints are documented below.
 
 ### Production with systemd
 
@@ -66,10 +67,31 @@ All configuration is read from `.env`:
 | `DATABASE_URL` | PostgreSQL connection string | `postgresql://user:pass@host:5432/db` |
 | `DB_SCHEMA` | Database schema name | `shelf` |
 | `API_PORT` | HTTP server port | `8001` |
-| `DEFAULT_USER_ID` | Single-user UUID | UUID |
+| `SUPABASE_JWT_SECRET` | HS256 secret used to verify access tokens | secret string |
+| `SUPABASE_JWT_AUD` | Expected `aud` claim; empty disables the check | `authenticated` |
+| `ANTHROPIC_API_KEY` | Key for the parse call | `sk-ant-...` |
+| `ANTHROPIC_MODEL` | Parse model — Haiku only (D5) | `claude-haiku-4-5` |
+| `TZ` | Timezone relative dates resolve against (alias: `CAPTURE_TIMEZONE`) | `Asia/Kolkata` |
 | `SHELVE_AFTER_IGNORES` | Decay constant | `3` |
 | `DROP_AFTER_DAYS` | Drop timeout in days | `90` |
 | `QUIET_HOURS_START` / `_END` | No notifications outside these hours | `22`, `7` |
+
+## Authentication (UC41)
+
+Every endpoint except `GET /health` requires a Supabase access token:
+
+```
+Authorization: Bearer <supabase access token>
+```
+
+The token is verified with `SUPABASE_JWT_SECRET` (HS256, `exp` and `aud`
+checked) and its `sub` claim is used as `user_id` on every row. There is no
+configured fallback identity. A missing, malformed, expired, wrongly signed,
+or subject-less token gets `401`; so does a well-formed token whose subject
+is not a Supabase user.
+
+Auth runs as middleware over everything not in `backend.auth.PUBLIC_PATHS`,
+so new routes are protected by default.
 
 ## API Endpoints
 
@@ -87,12 +109,13 @@ Check API and database connectivity.
 
 ### `POST /capture`
 
-Store a captured item.
+Store a captured item, then enrich it with one Haiku call (UC5, UC9, UC10,
+UC12, UC14).
 
 **Request:**
 ```json
 {
-  "text": "captured text",
+  "text": "Call the insurance guy tomorrow at 3pm, it's urgent",
   "source": "voice"
 }
 ```
@@ -101,13 +124,35 @@ Store a captured item.
 ```json
 {
   "id": "uuid",
-  "status": "captured"
+  "status": "captured",
+  "parse_status": "ok",
+  "state": "active",
+  "kind": "task",
+  "due_at": "2026-08-23T15:00:00Z",
+  "critical": true,
+  "text": "Call insurance agent about claim",
+  "project_hint": null,
+  "entities": [{"type": "person", "name": "Ravi"}]
 }
 ```
 
 `source` must be one of: `voice`, `text`, `widget`.
 
-Items are created with `parse_status = 'needs_review'` and initial state `shelved`.
+The row is written **before** the model call (D6). The parse then sets
+`kind`, `due_at`, `critical`, `state` (`active` if `due_at` is set, else
+`shelved`) and flips `parse_status` to `ok`.
+
+If the parse fails the row stays exactly as captured with
+`parse_status = 'failed'` and the endpoint still returns `200` — a capture
+is never lost (UC42).
+
+`text` is stored as `items.parsed_text` (migration 002); `raw_text` keeps
+the capture exactly as it arrived. `project_hint` and `entities` are
+returned but **not stored** — project inference is UC11 and entity linking
+is UC44, both phase 6.
+
+Relative dates ("tomorrow at 3pm") resolve against `TZ`, not the server
+clock (D15).
 
 ## Database
 
@@ -129,9 +174,17 @@ All operations are scoped to the `DB_SCHEMA` (default: `shelf`).
 
 ### Testing
 
-Run tests with pytest (add test files as needed):
 ```bash
-pytest
+./venv/bin/python -m pytest        # 32 tests, model call stubbed
+./venv/bin/python -m pytest -m live  # opt-in: real Haiku call
 ```
 
-Test client available in `backend.main` for unit tests.
+The default run stubs the Anthropic call, so it costs nothing and is
+deterministic. `-m live` runs `tests/test_timezone_live.py`, which proves
+against the real model that "tomorrow at 3pm" resolves to 15:00 IST and
+not 15:00 UTC.
+
+### Migrations
+
+Numbered SQL in `/migrations`, applied in order. Never edit one that has
+already run — add the next number instead.

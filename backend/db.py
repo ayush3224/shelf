@@ -1,5 +1,6 @@
 """Database connection and operations."""
 
+from datetime import datetime
 from typing import Optional
 from psycopg_pool import AsyncConnectionPool
 
@@ -38,7 +39,7 @@ class Database:
         user_id: str,
         raw_text: str,
         source: str,
-        parse_status: str = "needs_review",
+        parse_status: str = "failed",
         kind: str = "task",
         state: str = "shelved",
     ) -> str:
@@ -48,7 +49,8 @@ class Database:
             user_id: User ID (UUID)
             raw_text: Raw captured text
             source: Source of capture ('voice', 'text', or 'widget')
-            parse_status: Parse status (default 'needs_review')
+            parse_status: Parse status (default 'failed', flipped to 'ok'
+                by `apply_parse` — a crash mid-parse must not read as 'ok')
             kind: Item kind (default 'task')
             state: Initial state (default 'shelved')
 
@@ -70,6 +72,48 @@ class Database:
             if not row:
                 raise ValueError("Failed to create item")
             return row[0]
+
+    async def apply_parse(
+        self,
+        item_id: str,
+        user_id: str,
+        kind: str,
+        parsed_text: str,
+        due_at: Optional[datetime],
+        critical: bool,
+        state: str,
+    ) -> bool:
+        """Write a successful parse onto an existing item (UC9, UC10, UC12).
+
+        Args:
+            item_id: Item to update
+            user_id: Owner of the item; the update is scoped to them
+            kind: 'task', 'note' or 'person_note'
+            parsed_text: Cleaned one-line description; raw_text is untouched
+            due_at: Extracted due time, or None
+            critical: Whether the capture carried an urgency cue
+            state: 'active' if due_at is set, else 'shelved'
+
+        Returns:
+            True if the row was updated, False if no such row for this user.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                UPDATE {settings.db_schema}.items
+                   SET kind = %s,
+                       parsed_text = %s,
+                       due_at = %s,
+                       critical = %s,
+                       state = %s,
+                       parse_status = 'ok'
+                 WHERE id = %s AND user_id = %s
+                RETURNING id::text
+                """,
+                (kind, parsed_text, due_at, critical, state, item_id, user_id),
+            )
+            return await result.fetchone() is not None
 
 
 _db_instance: Optional[Database] = None

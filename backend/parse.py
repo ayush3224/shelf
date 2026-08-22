@@ -1,0 +1,224 @@
+"""Haiku parse of a raw capture (UC9, UC10, UC12, UC14).
+
+One small Anthropic call per capture. Classification plus extraction — see
+the parse contract in `docs/data-model.md`. Never Sonnet, never Opus, and
+never more than `MAX_PARSE_TOKENS` of output (CLAUDE.md cost rules).
+"""
+
+import json
+import logging
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from anthropic import AsyncAnthropic
+
+from backend.config import settings
+
+logger = logging.getLogger(__name__)
+
+KINDS = ("task", "note", "person_note")
+ENTITY_TYPES = ("person", "org", "place")
+
+# Kept low on purpose: a capture must not hang on the model, and a retry
+# storm is the failure mode that breaks the cost budget.
+_TIMEOUT_SECONDS = 20.0
+_MAX_RETRIES = 1
+
+SYSTEM_PROMPT = """You extract structured data from one voice capture.
+
+Reply with a single JSON object and nothing else — no markdown, no prose:
+{"kind":"task|note|person_note","text":"cleaned one-line description",
+"due_at":"ISO-8601 with UTC offset, or null","critical":true|false,
+"project_hint":"string or null","entities":[{"type":"person|org|place","name":"..."}]}
+
+kind: task = something the speaker must do; person_note = about a specific
+person; note = anything else.
+text: under 80 characters, imperative for a task, no filler words.
+due_at: only when the capture actually states a date or time. Resolve
+relative expressions against the current time given by the user. If no time
+is stated, null — never invent one.
+critical: true only on explicit urgency cues ("urgent", "critical",
+"don't let me miss this"). A deadline alone is not critical.
+project_hint: a project or area name if one is named, else null.
+entities: people, orgs and places named in the capture. Empty list if none."""
+
+
+class ParseError(Exception):
+    """The model call failed or returned something unusable."""
+
+
+@dataclass
+class ParseResult:
+    """The parse contract, normalised (UC9, UC10, UC14)."""
+
+    kind: str
+    text: str
+    due_at: Optional[datetime]
+    critical: bool
+    project_hint: Optional[str]
+    entities: list[dict[str, str]] = field(default_factory=list)
+
+    @property
+    def state(self) -> str:
+        """Initial state: timed things are active, untimed things shelve (UC12)."""
+        return "active" if self.due_at else "shelved"
+
+
+def _capture_tz() -> Any:
+    """Resolve the configured capture timezone, falling back to UTC."""
+    try:
+        return ZoneInfo(settings.capture_timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        logger.warning(
+            "Unknown CAPTURE_TIMEZONE %r; using UTC", settings.capture_timezone
+        )
+        return timezone.utc
+
+
+def _coerce_due_at(value: Any) -> Optional[datetime]:
+    """Turn the model's `due_at` into an aware datetime, or None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+
+    raw = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        logger.warning("Unparseable due_at from model: %r", value)
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_capture_tz())
+    return parsed
+
+
+def _coerce_entities(value: Any) -> list[dict[str, str]]:
+    """Keep only well-formed `{type, name}` entities. Linking is UC44, not now."""
+    if not isinstance(value, list):
+        return []
+
+    entities: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        etype = item.get("type")
+        if isinstance(name, str) and name.strip() and etype in ENTITY_TYPES:
+            entities.append({"type": etype, "name": name.strip()})
+    return entities
+
+
+def _coerce_text(value: Any, fallback: str) -> str:
+    """Cleaned one-line description, falling back to the raw capture."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return fallback.strip()
+
+
+def _decode(body: str, raw_text: str) -> ParseResult:
+    """Validate and normalise the model's JSON reply.
+
+    Args:
+        body: Raw text of the model's reply.
+        raw_text: The original capture, used as a fallback description.
+
+    Returns:
+        The normalised parse.
+
+    Raises:
+        ParseError: If the reply is not a JSON object or `kind` is not valid.
+    """
+    body = body.strip()
+    if body.startswith("```"):
+        body = body.split("```")[1].removeprefix("json").strip()
+
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as e:
+        raise ParseError(f"Model reply was not JSON: {e}") from e
+
+    if not isinstance(data, dict):
+        raise ParseError("Model reply was not a JSON object")
+
+    kind = data.get("kind")
+    if kind not in KINDS:
+        raise ParseError(f"Model returned an unknown kind: {kind!r}")
+
+    project_hint = data.get("project_hint")
+    if not isinstance(project_hint, str) or not project_hint.strip():
+        project_hint = None
+    else:
+        project_hint = project_hint.strip()
+
+    return ParseResult(
+        kind=kind,
+        text=_coerce_text(data.get("text"), raw_text),
+        due_at=_coerce_due_at(data.get("due_at")),
+        critical=bool(data.get("critical")),
+        project_hint=project_hint,
+        entities=_coerce_entities(data.get("entities")),
+    )
+
+
+def _client() -> AsyncAnthropic:
+    """Build the Anthropic client.
+
+    Raises:
+        ParseError: If no API key is configured.
+    """
+    if not settings.anthropic_api_key:
+        raise ParseError("ANTHROPIC_API_KEY is not configured")
+    return AsyncAnthropic(
+        api_key=settings.anthropic_api_key,
+        timeout=_TIMEOUT_SECONDS,
+        max_retries=_MAX_RETRIES,
+    )
+
+
+async def parse_capture(raw_text: str, now: Optional[datetime] = None) -> ParseResult:
+    """Parse one capture into the parse contract.
+
+    Args:
+        raw_text: Transcript or typed input.
+        now: Reference time for relative dates; defaults to the current time
+            in the configured capture timezone.
+
+    Returns:
+        The normalised parse.
+
+    Raises:
+        ParseError: On any API or decoding failure. The caller keeps the row
+            and flags it (UC42) — a failed parse never loses a capture.
+    """
+    reference = now or datetime.now(_capture_tz())
+
+    try:
+        response = await _client().messages.create(
+            model=settings.anthropic_model,
+            max_tokens=settings.max_parse_tokens,
+            system=SYSTEM_PROMPT,
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        f"Current time: {reference.isoformat()}\n"
+                        f"Capture: {raw_text}"
+                    ),
+                }
+            ],
+        )
+    except ParseError:
+        raise
+    except Exception as e:
+        raise ParseError(f"Anthropic call failed: {e}") from e
+
+    if response.stop_reason == "max_tokens":
+        raise ParseError("Model reply hit max_tokens and was truncated")
+
+    body = "".join(b.text for b in response.content if b.type == "text")
+    if not body:
+        raise ParseError(f"Model returned no text (stop_reason={response.stop_reason})")
+
+    return _decode(body, raw_text)

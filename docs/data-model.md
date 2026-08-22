@@ -32,7 +32,8 @@ The core row. One per captured thing.
 | `user_id` | uuid | |
 | `kind` | enum | `task` \| `note` \| `person_note` |
 | `state` | enum | `active` \| `shelved` \| `done` \| `dropped` |
-| `raw_text` | text | transcript or typed input |
+| `raw_text` | text | transcript or typed input, never rewritten |
+| `parsed_text` | text null | cleaned one-line description from the parse; falls back to `raw_text` for display |
 | `audio_path` | text null | Supabase Storage key; kept until delete |
 | `project_id` | uuid null | fk `projects` |
 | `due_at` | timestamptz null | presence decides initial state |
@@ -124,3 +125,11 @@ The Haiku call returns exactly this shape, nothing else:
 
 `split: true` means the note contained several items (UC4) and the
 caller should re-prompt for an array. Keep the common path cheap.
+
+Where each field lands on `items`: `kind`, `due_at` and `critical` map to
+their own columns, `text` to `parsed_text` (migration 002), and `due_at`
+decides `state` (UC12). `project_hint` and `entities` are returned to the
+caller but not yet stored — they need UC11 and UC44 respectively.
+
+Relative expressions ("tomorrow at 3pm") are resolved against `TZ`, not
+against the server clock. The server runs in UTC; the user does not.
