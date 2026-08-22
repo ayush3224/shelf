@@ -1,15 +1,17 @@
 [Unit]
 Description=Shelf Voice Capture API
-After=network.target postgresql.service
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
 
 [Service]
-Type=notify
-User=shelf
-WorkingDirectory=/opt/shelf
-Environment="PATH=/opt/shelf/venv/bin"
-EnvironmentFile=/opt/shelf/.env
-ExecStart=/opt/shelf/venv/bin/python -m backend.main
-Restart=on-failure
+Type=simple
+User=root
+WorkingDirectory=/root/shelf
+Environment="PATH=/root/shelf/venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/root/shelf/.env
+ExecStart=/root/shelf/venv/bin/python -m backend.main
+Restart=always
 RestartSec=10
 
 [Install]
