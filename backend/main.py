@@ -2,8 +2,9 @@
 
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
+from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
@@ -11,7 +12,7 @@ from psycopg.errors import ForeignKeyViolation
 from pydantic import BaseModel, Field
 
 from backend.auth import PUBLIC_PATHS, authenticate, current_user_id
-from backend.config import settings
+from backend.config import capture_tz, settings
 from backend.db import Database, close_db, get_db, init_db
 from backend.parse import ParseError, parse_capture
 
@@ -52,6 +53,40 @@ class CaptureResponse(BaseModel):
     text: Optional[str] = None
     project_hint: Optional[str] = None
     entities: list[dict[str, str]] = Field(default_factory=list)
+
+
+class TodayItem(BaseModel):
+    """One row of the `Today` list.
+
+    `text` is the parse's cleaned description, falling back to `raw_text`
+    when the parse failed (D14). Both are sent: the app shows `text` and
+    needs `raw_text` to show what was actually said on a flagged item (UC42).
+    """
+
+    id: str
+    text: str
+    raw_text: str
+    kind: str
+    state: str
+    due_at: datetime
+    critical: bool
+    parse_status: str
+    overdue: bool
+
+
+class TodayResponse(BaseModel):
+    """Response for GET /items/today."""
+
+    as_of: datetime
+    items: list[TodayItem]
+
+
+class DoneResponse(BaseModel):
+    """Response for POST /items/{item_id}/done."""
+
+    id: str
+    state: str
+    changed: bool
 
 
 @asynccontextmanager
@@ -191,6 +226,78 @@ async def capture(
         project_hint=parsed.project_hint,
         entities=parsed.entities,
     )
+
+
+@app.get("/items/today", response_model=TodayResponse)
+async def items_today(
+    db: Database = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+) -> TodayResponse:
+    """The `Today` list: active items due or overdue (UC32).
+
+    Bounded to the end of the user's day in their timezone, not the server's
+    (D15) — the cut-off is a wall-clock notion and the server runs in UTC.
+    `Today` has to stay finishable; anything due later is not on it.
+
+    Args:
+        db: Database connection.
+        user_id: Authenticated user, from the Supabase token.
+
+    Returns:
+        Items ordered oldest-due first, each flagged `overdue` or not.
+    """
+    tz = capture_tz()
+    now = datetime.now(tz)
+    end_of_day = (now + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
+    try:
+        rows = await db.today_items(user_id=user_id, before=end_of_day)
+    except Exception as e:
+        logger.error("Failed to load Today for user %s: %s", user_id, e)
+        raise HTTPException(status_code=500, detail="Failed to load items")
+
+    return TodayResponse(
+        as_of=now,
+        items=[TodayItem(**row, overdue=row["due_at"] <= now) for row in rows],
+    )
+
+
+@app.post("/items/{item_id}/done", response_model=DoneResponse)
+async def mark_item_done(
+    item_id: UUID,
+    db: Database = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+) -> DoneResponse:
+    """Mark an item done (UC16).
+
+    The only state the user ever sets by hand. Idempotent, so a double tap
+    or a retried request does not write a second transition.
+
+    Args:
+        item_id: Item to complete. Typed as a UUID so a malformed id is a 422
+            from the framework, not a database error dressed up as a 500.
+        db: Database connection.
+        user_id: Authenticated user, from the Supabase token.
+
+    Returns:
+        The item id and its now-terminal state; `changed` is False if it was
+        already done.
+
+    Raises:
+        HTTPException: 404 if this user has no such item.
+    """
+    try:
+        previous = await db.mark_done(item_id=str(item_id), user_id=user_id)
+    except Exception as e:
+        logger.error("Failed to mark item %s done: %s", item_id, e)
+        raise HTTPException(status_code=500, detail="Failed to update item")
+
+    if previous is None:
+        raise HTTPException(status_code=404, detail="No such item")
+
+    return DoneResponse(id=str(item_id), state="done", changed=previous != "done")
 
 
 if __name__ == "__main__":

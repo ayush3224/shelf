@@ -87,6 +87,30 @@ as the reference time.
 *Revisit if:* captures start happening in more than one timezone — then the
 device should send its offset and the setting should go away.
 
+**D16 — The app never touches Postgres; everything goes through the API.**
+Supabase's client is used for auth and nothing else. RLS would make direct
+reads safe, but it would not make them *correct* — the state machine, the
+`Today` bound and the `transitions` log all live in the API, and a second
+writer is how they drift apart.
+*Revisit if:* a read is genuinely display-only and the round trip hurts.
+
+**D17 — `Today` is bounded server-side, at the end of the user's day.**
+`GET /items/today` returns `active` items with `due_at` before local midnight,
+oldest first. The client does no filtering of its own. A bound the client owns
+is a bound that widens quietly, and a `Today` that has stopped being finishable
+is the design failing (constraint 3).
+*Consequence:* something due at 00:20 is not on today's list at 23:50. Surfacing
+it at the due moment is UC23's job, not the list's.
+
+**D18 — The session lives in the device keystore, chunked.**
+`expo-secure-store` writes to the Android Keystore / iOS keychain, and the
+platforms reject large values — a Supabase session with two JWTs clears the
+historic ~2KB iOS limit. The storage adapter splits values across numbered keys
+and writes the manifest last, so a torn write reads as the old value rather
+than a corrupt one. Storing the session unencrypted was the alternative, and
+it is a bearer token for the whole API.
+*Revisit if:* the session shrinks enough that chunking is dead code.
+
 ---
 
 ## Open
@@ -102,6 +126,11 @@ resurrect something from the shelf after 60+ days?
 understood ("Got it — call insurance, Tuesday 3pm") or stay silent and
 trust the parse? Echo catches errors but taxes every single capture.
 Leaning silent, with a correction affordance in `Today` instead.
+*Phase 1 ships the middle option:* the capture screen says where the item
+landed ("Saved — it's on Today", "Saved to the shelf") but not what the model
+thought it heard. That is state being announced, not the parse being echoed.
+Still open, because the correction affordance it leans on is UC38 and is not
+built yet.
 
 **O4 — Hinglish transcription quality.** On-device recognition may
 struggle with code-switching. Measure the real failure rate in Phase 1

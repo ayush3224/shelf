@@ -16,6 +16,8 @@ them by hand.
 | `docs/data-model.md` | Schema, state machine, parse contract. |
 | `docs/architecture.md` | Components, flows, external services. |
 | `docs/decisions.md` | Decisions made, and what's still open. |
+| `backend/README.md` | The API. |
+| `mobile/README.md` | The Expo app, and the Google sign-in setup. |
 
 ## Setup
 

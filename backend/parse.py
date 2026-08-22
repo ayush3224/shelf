@@ -8,13 +8,12 @@ never more than `MAX_PARSE_TOKENS` of output (CLAUDE.md cost rules).
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Optional
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from anthropic import AsyncAnthropic
 
-from backend.config import settings
+from backend.config import capture_tz, settings
 
 logger = logging.getLogger(__name__)
 
@@ -66,17 +65,6 @@ class ParseResult:
         return "active" if self.due_at else "shelved"
 
 
-def _capture_tz() -> Any:
-    """Resolve the configured capture timezone, falling back to UTC."""
-    try:
-        return ZoneInfo(settings.capture_timezone)
-    except (ZoneInfoNotFoundError, ValueError):
-        logger.warning(
-            "Unknown CAPTURE_TIMEZONE %r; using UTC", settings.capture_timezone
-        )
-        return timezone.utc
-
-
 def _coerce_due_at(value: Any) -> Optional[datetime]:
     """Turn the model's `due_at` into an aware datetime, or None."""
     if not isinstance(value, str) or not value.strip():
@@ -90,7 +78,7 @@ def _coerce_due_at(value: Any) -> Optional[datetime]:
         return None
 
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=_capture_tz())
+        parsed = parsed.replace(tzinfo=capture_tz())
     return parsed
 
 
@@ -192,7 +180,7 @@ async def parse_capture(raw_text: str, now: Optional[datetime] = None) -> ParseR
         ParseError: On any API or decoding failure. The caller keeps the row
             and flags it (UC42) — a failed parse never loses a capture.
     """
-    reference = now or datetime.now(_capture_tz())
+    reference = now or datetime.now(capture_tz())
 
     try:
         response = await _client().messages.create(

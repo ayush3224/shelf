@@ -11,7 +11,8 @@ from types import SimpleNamespace
 import pytest
 
 from backend import parse
-from backend.parse import ParseError, ParseResult, _capture_tz, _decode, parse_capture
+from backend.config import capture_tz
+from backend.parse import ParseError, ParseResult, _decode, parse_capture
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -51,7 +52,7 @@ def stub_model(monkeypatch):
 def test_capture_tz_is_ist():
     """TZ=Asia/Kolkata in .env means the parse resolves dates in IST (O6)."""
     offset = (
-        datetime(2026, 8, 23, tzinfo=timezone.utc).astimezone(_capture_tz()).utcoffset()
+        datetime(2026, 8, 23, tzinfo=timezone.utc).astimezone(capture_tz()).utcoffset()
     )
     assert offset == timedelta(hours=5, minutes=30)
 
@@ -60,7 +61,7 @@ def test_unknown_timezone_falls_back_to_utc(monkeypatch):
     """A typo'd TZ must not take the capture path down with it."""
     monkeypatch.setattr(parse.settings, "capture_timezone", "Mars/Olympus_Mons")
     assert datetime(2026, 8, 23, tzinfo=timezone.utc).astimezone(
-        _capture_tz()
+        capture_tz()
     ).utcoffset() == timedelta(0)
 
 

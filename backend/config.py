@@ -1,7 +1,13 @@
 """Configuration from environment variables."""
 
+import logging
+from datetime import timezone, tzinfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -40,3 +46,22 @@ class Settings(BaseSettings):
 
 
 settings = Settings()  # type: ignore
+
+
+def capture_tz() -> tzinfo:
+    """The timezone the user captures in, falling back to UTC (D15).
+
+    The server runs in UTC and the user does not, so anything resolving a
+    wall-clock notion — relative dates in the parse, "end of today" on the
+    `Today` list — goes through this rather than the server clock.
+
+    Returns:
+        The configured timezone, or UTC if the name is unknown.
+    """
+    try:
+        return ZoneInfo(settings.capture_timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        logger.warning(
+            "Unknown CAPTURE_TIMEZONE %r; using UTC", settings.capture_timezone
+        )
+        return timezone.utc
