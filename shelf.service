@@ -1,0 +1,16 @@
+[Unit]
+Description=Shelf Voice Capture API
+After=network.target postgresql.service
+
+[Service]
+Type=notify
+User=shelf
+WorkingDirectory=/opt/shelf
+Environment="PATH=/opt/shelf/venv/bin"
+EnvironmentFile=/opt/shelf/.env
+ExecStart=/opt/shelf/venv/bin/python -m backend.main
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
