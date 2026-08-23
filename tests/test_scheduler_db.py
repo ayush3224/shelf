@@ -396,6 +396,17 @@ async def test_finishing_an_item_answers_its_push(db, delivers):
     assert (await item_row(db, item_id))["state"] == "done"
 
 
+async def test_moving_to_a_non_active_state_is_still_a_manual_move(db):
+    """Only the edge *into* `active` is special; the rest stay `manual` (UC21)."""
+    item_id = await make_item(
+        db, due_at=datetime.now(timezone.utc) + timedelta(hours=1)
+    )
+
+    assert await db.set_state(item_id, USER, "dropped") == "active"
+
+    assert await transitions(db, item_id) == [("active", "dropped", "manual")]
+
+
 async def test_an_item_moved_by_hand_has_its_push_cancelled(db, delivers):
     """Moving an item is an answer too — just not one of the three (UC21).
 
@@ -628,13 +639,22 @@ async def test_undoing_a_done_item_is_a_manual_move_not_a_reactivation(db):
     assert await transitions(db, item_id) == [("done", "active", "manual")]
 
 
-async def test_the_chip_route_into_active_is_logged_as_a_reactivation(db):
-    """UC21's manual move and UC20 are the same event when they cross the same edge."""
-    item_id = await make_item(db, state="shelved", due_at=None)
+async def test_the_chip_route_into_active_is_the_same_move(db):
+    """UC21's manual move and UC20 are one event when they cross the same edge.
 
-    await db.set_state(item_id, USER, "active")
+    The chip goes through the same implementation, so it cannot skip either of
+    the two things reactivation has to do: log the edge as `reactivation`, and
+    give the item a due time. An `active` item with no time is one nothing in
+    the app can show (D35).
+    """
+    item_id = await make_item(db, state="shelved", due_at=None, push_count=3)
+
+    assert await db.set_state(item_id, USER, "active") == "shelved"
 
     assert await transitions(db, item_id) == [("shelved", "active", "reactivation")]
+    row = await item_row(db, item_id)
+    assert row["due_at"] is not None
+    assert row["push_count"] == 0
 
 
 async def test_snoozing_a_shelved_item_reports_rather_than_moves_it(db):

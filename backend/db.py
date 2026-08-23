@@ -471,11 +471,13 @@ class Database:
         `manual` so that decay-driven moves stay distinguishable from
         user-driven ones — the whole point of O1 and O2 is telling them apart.
 
-        One exception: `shelved` or `dropped` back to `active` is logged as
-        `reactivation`, whichever route it came in by. That move *is* UC20,
-        and O1 is answered by counting it — a decayed item the user fetches
-        back by hand is the evidence that the threshold is too low. Leaving it
-        as `manual` would hide it among the ordinary corrections.
+        Moving *to* `active` is handed to `reactivate_item` rather than done
+        here, whichever control asked for it. Two reasons, and both are things
+        this method got wrong on its own: the move has to settle a due time,
+        because `active` with none is a state nothing in this app can show
+        (D17, D35) — and coming back from `shelved` or `dropped` has to be
+        logged as `reactivation`, because that edge *is* UC20 and counting it
+        is how O1 gets answered. One implementation, so the two cannot drift.
 
         Idempotent: setting the state an item is already in writes no
         transition.
@@ -488,6 +490,10 @@ class Database:
         Returns:
             The state the item was in before, or None if no such item.
         """
+        if state == "active":
+            row = await self.reactivate_item(item_id, user_id)
+            return row["previous"] if row else None
+
         pool = await self._ensure_pool()
         async with pool.connection() as conn:
             result = await conn.execute(
@@ -507,26 +513,12 @@ class Database:
                 logged AS (
                     INSERT INTO {settings.db_schema}.transitions
                       (item_id, from_state, to_state, reason)
-                    SELECT prev.id, prev.state, %s,
-                           CASE
-                             WHEN %s = 'active'
-                              AND prev.state::text = ANY(%s)
-                               THEN 'reactivation'
-                             ELSE 'manual'
-                           END::{settings.db_schema}.transition_reason
+                    SELECT prev.id, prev.state, %s, 'manual'
                       FROM prev JOIN upd ON upd.id = prev.id
                 )
                 SELECT prev.state::text FROM prev
                 """,
-                (
-                    item_id,
-                    user_id,
-                    state,
-                    state,
-                    state,
-                    state,
-                    list(_REACTIVATED_FROM),
-                ),
+                (item_id, user_id, state, state, state),
             )
             row = await result.fetchone()
             return row[0] if row else None

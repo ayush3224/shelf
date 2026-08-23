@@ -373,10 +373,13 @@ nothing in this app would ever surface again. Reactivating without one sets it
 to now; a time still in the future is left alone, and a time in the past is
 replaced, because the point of reactivating is that you want it now and not
 that you want to be told it was overdue in March.
-Crossing `shelved → active` is logged as `reactivation` whichever control asked
-for it — the chips (UC21) route through the same call. That edge *is* the
-evidence O1 is tuned from, and leaving it as `manual` would hide it among the
-ordinary corrections. Un-finishing a `done` item is not that, and stays
+Every route into `active` is *one implementation*: `set_state` (UC21's chips)
+hands the move to `reactivate_item` rather than doing it itself. That was not
+tidiness — on its own, the chip left `due_at` null and produced exactly the
+invisible item described above. Crossing `shelved → active` is therefore
+logged as `reactivation` whichever control asked for it, which matters because
+that edge *is* the evidence O1 is tuned from and `manual` would hide it among
+the ordinary corrections. Un-finishing a `done` item is not that, and stays
 `manual`.
 
 **D36 — The one-minute tick is a systemd timer, not Railway cron.**
