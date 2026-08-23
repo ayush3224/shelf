@@ -34,7 +34,9 @@ The core row. One per captured thing.
 | `state` | enum | `active` \| `shelved` \| `done` \| `dropped` |
 | `raw_text` | text | transcript or typed input, never rewritten |
 | `parsed_text` | text null | cleaned one-line description from the parse; falls back to `raw_text` for display |
-| `audio_path` | text null | Supabase Storage key; kept until delete |
+| `audio_path` | text null | Supabase Storage key; kept until delete. Split siblings (UC4) share one |
+| `transcript_source` | enum | `on_device` \| `cloud` \| `none` — which path produced `raw_text` (migration 003) |
+| `transcript_confidence` | real null | Transcriber confidence in [0,1]; null if it reported none |
 | `project_id` | uuid null | fk `projects` |
 | `due_at` | timestamptz null | presence decides initial state |
 | `critical` | bool | drives full-screen alarm / call tier |
@@ -46,7 +48,8 @@ The core row. One per captured thing.
 | `created_at` / `updated_at` | timestamptz | |
 
 Indexes: `(user_id, state, due_at)`, `(user_id, state_changed_at)`,
-full-text GIN on `raw_text` for UC34.
+full-text GIN on `raw_text` for UC34, and `(audio_path)` where non-null —
+that key is how a split's siblings are found.
 
 ### `transitions`
 Append-only audit of every state change. **This table is how you tune
@@ -104,6 +107,9 @@ SHELVE_AFTER_IGNORES = 3     # UC18 — tune from `transitions`
 DROP_AFTER_DAYS      = 90    # UC19 — tune from `transitions`
 QUIET_HOURS          = (22, 7)
 MAX_PARSE_TOKENS     = 200
+MAX_SPLIT_TOKENS     = 600   # UC4 — the array re-prompt only (D19)
+MAX_SPLIT_ITEMS      = 10
+TRANSCRIPT_CONFIDENCE_FLOOR = 0.55  # below this → needs_review (D22)
 DIGEST_DAY           = "sunday"
 ```
 
@@ -125,6 +131,16 @@ The Haiku call returns exactly this shape, nothing else:
 
 `split: true` means the note contained several items (UC4) and the
 caller should re-prompt for an array. Keep the common path cheap.
+
+The re-prompt returns `{"items": [ ... ]}`, each element the same shape minus
+`split`. It is the only call allowed past `MAX_PARSE_TOKENS` — an array does
+not fit in 200 — and is capped at `MAX_SPLIT_TOKENS` / `MAX_SPLIT_ITEMS`
+instead (D19). One row is written per item; every one carries the same
+`audio_path`, and that shared key is the only thing grouping them. Each gets
+its own `due_at` and therefore its own initial state (UC12), but they all keep
+the *whole* transcript in `raw_text`: UC38 edits against what was actually
+said and UC34 searches it, and neither is served by a fragment the user never
+spoke. A split that fails degrades to the single item already parsed.
 
 Where each field lands on `items`: `kind`, `due_at` and `critical` map to
 their own columns, `text` to `parsed_text` (migration 002), and `due_at`

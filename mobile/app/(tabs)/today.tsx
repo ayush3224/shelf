@@ -20,10 +20,22 @@ import { useFocusEffect } from 'expo-router';
 import { ApiError, markDone, today } from '../../lib/api';
 import type { TodayItem } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
+import { usePlayback } from '../../lib/playback';
 import { dueLabel } from '../../lib/time';
 import { color, radius, space } from '../../lib/theme';
 
-function Row({ item, onDone }: { item: TodayItem; onDone: (id: string) => void }) {
+type RowProps = {
+  item: TodayItem;
+  onDone: (id: string) => void;
+  onPlay: (id: string) => void;
+  playing: boolean;
+  loadingAudio: boolean;
+};
+
+function Row({ item, onDone, onPlay, playing, loadingAudio }: RowProps) {
+  // The row is the done affordance (UC16, one tap). Playback is a separate
+  // target inside it so that reaching for the audio cannot finish the item by
+  // accident — the two gestures must not overlap.
   return (
     <Pressable
       accessibilityRole="button"
@@ -39,14 +51,34 @@ function Row({ item, onDone }: { item: TodayItem; onDone: (id: string) => void }
             {dueLabel(item.due_at)}
           </Text>
           {item.critical ? <Text style={styles.critical}>Critical</Text> : null}
+          {item.parse_status !== 'ok' ? (
+            <Text style={styles.flagged}>Check this</Text>
+          ) : null}
         </View>
       </View>
+
+      {item.has_audio ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={playing ? 'Stop the recording' : 'Play the recording'}
+          hitSlop={10}
+          onPress={() => onPlay(item.id)}
+          style={({ pressed }) => [styles.play, pressed && styles.playPressed]}
+        >
+          {loadingAudio ? (
+            <ActivityIndicator color={color.muted} size="small" />
+          ) : (
+            <Text style={styles.playGlyph}>{playing ? '\u25a0' : '\u25b6'}</Text>
+          )}
+        </Pressable>
+      ) : null}
     </Pressable>
   );
 }
 
 export default function Today() {
   const { signOut } = useAuth();
+  const playback = usePlayback();
   const [items, setItems] = useState<TodayItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -86,6 +118,7 @@ export default function Today() {
       // Optimistic: the tap is the whole interaction, so it should not wait on
       // a round trip. A failure puts the row back and says so.
       setItems((current) => current.filter((i) => i.id !== id));
+      if (playback.activeId === id) playback.stop();
       setError(null);
       try {
         await markDone(id);
@@ -100,7 +133,7 @@ export default function Today() {
         );
       }
     },
-    [items, signOut],
+    [items, signOut, playback],
   );
 
   if (loading) {
@@ -120,12 +153,22 @@ export default function Today() {
         ) : null}
       </View>
 
-      {error ? <Text style={styles.error}>{error}</Text> : null}
+      {error ?? playback.error ? (
+        <Text style={styles.error}>{error ?? playback.error}</Text>
+      ) : null}
 
       <FlatList
         data={items}
         keyExtractor={(item) => item.id}
-        renderItem={({ item }) => <Row item={item} onDone={(id) => void done(id)} />}
+        renderItem={({ item }) => (
+          <Row
+            item={item}
+            onDone={(id) => void done(id)}
+            onPlay={(id) => void playback.toggle(id)}
+            playing={playback.activeId === item.id && !playback.loading}
+            loadingAudio={playback.activeId === item.id && playback.loading}
+          />
+        )}
         contentContainerStyle={items.length === 0 ? styles.emptyWrap : styles.list}
         refreshControl={
           <RefreshControl
@@ -173,6 +216,17 @@ const styles = StyleSheet.create({
     color: color.danger,
   },
   list: { paddingHorizontal: space.lg, paddingBottom: space.xl, gap: space.sm },
+  flagged: { fontSize: 12, fontWeight: '600', color: color.muted },
+  play: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: color.border,
+  },
+  playPressed: { opacity: 0.7 },
+  playGlyph: { fontSize: 13, color: color.text },
   row: {
     flexDirection: 'row',
     alignItems: 'flex-start',

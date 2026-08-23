@@ -42,6 +42,9 @@ class Database:
         parse_status: str = "failed",
         kind: str = "task",
         state: str = "shelved",
+        audio_path: Optional[str] = None,
+        transcript_source: str = "none",
+        transcript_confidence: Optional[float] = None,
     ) -> str:
         """Create an item in the database.
 
@@ -53,6 +56,11 @@ class Database:
                 by `apply_parse` — a crash mid-parse must not read as 'ok')
             kind: Item kind (default 'task')
             state: Initial state (default 'shelved')
+            audio_path: Storage key of the recording, kept until the item is
+                deleted (UC7). None for typed captures.
+            transcript_source: 'on_device', 'cloud' or 'none' — which path
+                produced `raw_text`.
+            transcript_confidence: Transcriber confidence in [0,1], or None.
 
         Returns:
             Created item ID
@@ -62,16 +70,155 @@ class Database:
             result = await conn.execute(
                 f"""
                 INSERT INTO {settings.db_schema}.items
-                  (user_id, raw_text, source, parse_status, kind, state)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                  (user_id, raw_text, source, parse_status, kind, state,
+                   audio_path, transcript_source, transcript_confidence)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id::text
                 """,
-                (user_id, raw_text, source, parse_status, kind, state),
+                (
+                    user_id,
+                    raw_text,
+                    source,
+                    parse_status,
+                    kind,
+                    state,
+                    audio_path,
+                    transcript_source,
+                    transcript_confidence,
+                ),
             )
             row = await result.fetchone()
             if not row:
                 raise ValueError("Failed to create item")
             return row[0]
+
+    async def create_split_item(
+        self,
+        user_id: str,
+        raw_text: str,
+        source: str,
+        kind: str,
+        parsed_text: str,
+        due_at: Optional[datetime],
+        critical: bool,
+        state: str,
+        audio_path: Optional[str],
+        transcript_source: str,
+        transcript_confidence: Optional[float],
+    ) -> str:
+        """Write one sibling of a split capture, already parsed (UC4).
+
+        The first item of a split reuses the row that `create_item` wrote
+        before the model call (D6); this writes the rest. They are inserted
+        parsed rather than written-then-updated because their parse is already
+        in hand — there is no window where a crash could leave them claiming a
+        parse that never happened.
+
+        Every sibling carries the same `audio_path`. That shared key is the
+        only thing grouping them, so it is what UC7 plays back for any of them.
+
+        Args:
+            user_id: Owner of the item.
+            raw_text: The whole transcript, not this item's slice of it. UC38
+                edits against what was actually said and UC34 searches it, and
+                neither is served by storing a fragment the user never spoke.
+            source: 'voice', 'text' or 'widget'.
+            kind: 'task', 'note' or 'person_note'.
+            parsed_text: This item's cleaned one-line description.
+            due_at: This item's own due time, or None.
+            critical: Whether this item carried an urgency cue.
+            state: 'active' if due_at is set, else 'shelved' (UC12).
+            audio_path: Shared with every sibling.
+            transcript_source: Shared with every sibling.
+            transcript_confidence: Shared with every sibling.
+
+        Returns:
+            Created item ID.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                INSERT INTO {settings.db_schema}.items
+                  (user_id, raw_text, source, parse_status, kind, state,
+                   parsed_text, due_at, critical,
+                   audio_path, transcript_source, transcript_confidence)
+                VALUES (%s, %s, %s, 'ok', %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id::text
+                """,
+                (
+                    user_id,
+                    raw_text,
+                    source,
+                    kind,
+                    state,
+                    parsed_text,
+                    due_at,
+                    critical,
+                    audio_path,
+                    transcript_source,
+                    transcript_confidence,
+                ),
+            )
+            row = await result.fetchone()
+            if not row:
+                raise ValueError("Failed to create split item")
+            return row[0]
+
+    async def set_parse_status(self, item_id: str, user_id: str, status: str) -> bool:
+        """Set `parse_status` on its own (UC42, D13).
+
+        Used when the transcript is usable but not trusted — a low-confidence
+        recognition becomes `needs_review` rather than `ok`, which is the use
+        D13 reserved for that status.
+
+        Args:
+            item_id: Item to flag.
+            user_id: Owner; the update is scoped to them.
+            status: 'ok', 'failed' or 'needs_review'.
+
+        Returns:
+            True if the row was updated.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                UPDATE {settings.db_schema}.items
+                   SET parse_status = %s
+                 WHERE id = %s AND user_id = %s
+                RETURNING id::text
+                """,
+                (status, item_id, user_id),
+            )
+            return await result.fetchone() is not None
+
+    async def item_audio_path(self, item_id: str, user_id: str) -> Optional[str]:
+        """The storage key of an item's recording, if it has one (UC7).
+
+        Scoped to the owner: this is what stands between a guessed item id and
+        someone else's voice.
+
+        Args:
+            item_id: Item to look up.
+            user_id: Owner.
+
+        Returns:
+            The storage key, or None if this user has no such item or it has
+            no audio.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                SELECT audio_path
+                  FROM {settings.db_schema}.items
+                 WHERE id = %s AND user_id = %s
+                """,
+                (item_id, user_id),
+            )
+            row = await result.fetchone()
+            return row[0] if row else None
 
     async def apply_parse(
         self,
@@ -144,7 +291,8 @@ class Database:
                        state::text,
                        due_at,
                        critical,
-                       parse_status::text
+                       parse_status::text,
+                       audio_path IS NOT NULL AS has_audio
                   FROM {settings.db_schema}.items
                  WHERE user_id = %s
                    AND state = 'active'

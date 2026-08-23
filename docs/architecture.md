@@ -29,21 +29,37 @@
 
 ## Capture flow
 
-1. User holds the mic button; app records to a local file.
-2. On-device `SpeechRecognizer` transcribes. If confidence is low or
-   the recognizer fails, mark for cloud fallback.
-3. App uploads `{audio, transcript?, source}` to `/capture`.
-4. Backend stores audio in Supabase Storage, writes the `items` row
-   immediately with `parse_status = needs_review`.
-5. Backend calls Haiku with the parse contract (see `data-model.md`).
-6. On success: fill `kind`, `due_at`, `critical`, entities;
-   set `state = active` if `due_at` present else `shelved`;
-   `parse_status = ok`.
-7. On failure: leave the row, keep the audio, `parse_status = failed`.
+1. User holds the mic button; the app records to a local `.m4a`.
+   Microphone permission is asked here, on the first hold, not at launch.
+2. App uploads `{audio, transcript?, source}` to `POST /capture/audio`.
+   `transcript` is for an on-device result; nothing produces one today
+   (**D20**), so in practice it is absent and step 4 does the work.
+3. Backend stores the audio in Supabase Storage **first**. If that fails the
+   request fails with 503 — the file is still on the device, and reporting
+   success would be the one lie this path must not tell (D21).
+4. Backend writes the `items` row with `audio_path`, `transcript_source` and
+   `parse_status = failed` (D13).
+5. Backend transcribes (`whisper-large-v3-turbo` on Groq, D24) unless the
+   client sent a transcript. A 429 or a flaky connection is retried with
+   backoff inside a 75s deadline (D25); if it still fails, the row keeps the
+   audio and no words and stops here (UC42).
+6. Backend calls Haiku with the parse contract (see `data-model.md`).
+7. If the parse sets `split`, a second Haiku call returns an array and one row
+   is written per item, all sharing the one `audio_path` (UC4, D19). A failed
+   split degrades to the single item already parsed.
+8. On success: fill `kind`, `due_at`, `critical`; set `state = active` if
+   `due_at` is present else `shelved`; `parse_status = ok`, or
+   `needs_review` if the transcript was low-confidence (D22).
+9. On failure: leave the row, keep the audio, `parse_status = failed`.
    **The capture is never lost** (UC42).
 
-Note step 4 — the row is written *before* the model call. Parsing is an
-enrichment, not a gate.
+Note the order. Steps 3 and 4 come before any model call: the recording is the
+only part of a capture that cannot be reproduced, and parsing is an enrichment,
+not a gate.
+
+Playback (UC7) is `GET /items/{id}/audio`, which mints a short-lived signed
+URL per request rather than storing one on the row — the bucket holds the
+user's voice.
 
 ## Scheduler (1-minute tick)
 
@@ -88,6 +104,7 @@ timeout.
 | Service | Purpose | Expected cost |
 |---------|---------|---------------|
 | Anthropic API | parse, NL query | < $1 / month at ~20 captures/day |
+| Groq (Whisper STT) | transcription | free tier covers ~20 captures/day — see D20, D24 |
 | Supabase | DB, auth, storage | free tier |
 | Railway | API + cron | ~$5 / month |
 | Google Calendar | UC43 | free |

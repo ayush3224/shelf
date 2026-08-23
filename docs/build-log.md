@@ -140,7 +140,7 @@ off-site copy is still worth adding.
 
 | Area | Status |
 |---|---|
-| Schema (`shelf`, 7 tables + view) | ✅ live |
+| Schema (`shelf`, 7 tables + view) | ✅ live, migrations 001–003 applied |
 | Audio bucket (`shelf-audio`, private) | ✅ created, unused |
 | API at `https://srv1531684.hstgr.cloud/api` | ✅ live on 443 |
 | systemd service, survives reboot | ✅ verified |
@@ -150,6 +150,12 @@ off-site copy is still worth adding.
 | Timezone handling (IST) | ✅ tested — "tomorrow 3pm" → 09:30Z |
 | `GET /items/today`, `POST /items/{id}/done` | ⚠️ built, needs service restart |
 | Expo app: capture, today, sign-in | ⚠️ built, never run on a phone |
+| Voice capture, hold-to-record (UC1) | ⚠️ API verified live; UI never run on a phone |
+| Audio stored + signed playback (UC7) | ✅ verified live, byte-identical |
+| Cloud transcription (UC8) | ✅ verified live — Groq turbo, 1.6s round trip |
+| Multi-item splitting (UC4) | ⚠️ built, never run against real Haiku |
+| Mobile test suite (jest-expo) | ✅ 29 tests |
+| Backend test suite | ✅ 164 tests |
 | Native dep tree vs SDK 57 matrix | ✅ reconciled, `expo-doctor` 21/21 |
 | Google OAuth redirect handling | ✅ callback swallowed, not routed |
 | Google OAuth config | ❌ not started |
@@ -189,7 +195,7 @@ off-site copy is still worth adding.
 | O1 | Ignores before auto-shelve | 3 |
 | O2 | Days shelved before auto-drop | 90 |
 | O3 | Echo the parse back on capture? | Middle option shipped — state announced, parse not echoed |
-| O4 | Hinglish transcription quality | Unmeasured; on-device STT first |
+| ~~O4~~ | ~~Hinglish transcription quality~~ | **Closed 23 Aug 2026** — English only, so the premise is gone (D23) |
 
 O1 and O2 are answerable from data rather than opinion: the
 `transitions` table logs every state change with a reason, so after a
@@ -349,3 +355,307 @@ Still unproven on hardware: that Android delivers the intent at all,
 which depends on the generated intent-filter. The harnesses live in the
 session scratchpad, not the repo — no test infrastructure exists for
 `mobile/` yet and adding jest-expo was out of scope for a bug fix.
+
+### 23 August 2026 — voice capture, retained audio, splitting
+
+Three use cases, one decision that shaped all of them.
+
+**The STT decision (D20).** `SpeechRecognizer` transcribes live from the
+microphone and never produces a file. UC7 and UC42 both require the file,
+so a recorder has to run regardless — and the microphone is effectively
+single-consumer, so running both is a fight. The one module that does
+both, `expo-speech-recognition`, is published against SDK 56 while this
+app is on 57: exactly the out-of-matrix native module that broke the EAS
+builds last session. So the file is recorded with `expo-audio` and the
+server transcribes it. That is the escape hatch that was offered, and it
+was the right one.
+
+Two things worth being blunt about. The cost is ~$0.90/month at 20
+captures a day — most of the stated budget, and more than the Haiku
+parse. And **O4 becomes unmeasurable as written**: with no on-device
+path there is no on-device failure rate to compare against.
+`transcript_source` (`on_device` / `cloud` / `none`) is written on every
+row anyway so the comparison works the day a second path exists, and
+`transcript_confidence` answers the half of O4 that is still live — how
+good the cloud transcript is on code-switched speech.
+
+*(Later the same day: O4 was closed outright. See the next entry.)*
+
+**Ordering is the design.** `POST /capture/audio` stores the recording
+*first*, then writes the row, then transcribes, then parses. A failed
+upload is a 503, deliberately (D21): the file is still on the device at
+that moment, and "saved" would be a lie. Everything after the upload
+degrades instead — a failed transcription keeps the audio and no words, a
+failed parse keeps the audio and the words. If the row will not write,
+the orphaned object is deleted, because an object no row points at is
+only a bill.
+
+**Splitting (UC4).** `split` joins the parse contract; only when it is
+set does a second Haiku call run, and only that call gets past the
+200-token cap (D19, capped at 600 / 10 items). The first item reuses the
+row already written before the model call; siblings are inserted
+alongside it sharing one `audio_path`, which is the only thing grouping
+them. Every sibling keeps the *whole* transcript — UC38 edits against
+what was said and UC34 searches it, and a fragment the user never spoke
+serves neither. A failed split degrades to the single item already
+parsed. It applies to typed captures too; nothing about it is voice-only.
+
+`needs_review` finally has the use D13 predicted for it (D22): a
+low-confidence transcript is parsed normally, then flagged.
+
+**Two bugs found by writing the tests, both real:**
+
+- `extension_for` ran `mimetypes.guess_extension` on any content type,
+  and that maps `application/octet-stream` to `.bin` — so a non-audio
+  upload was stored as an unplayable blob under a name claiming nothing
+  was wrong, in the function whose whole job was refusing that. The
+  filename is now consulted first and `mimetypes` only for `audio/*`.
+- `app/+native-intent.tsx` raced its exchange against a `setTimeout` it
+  never cleared, so the winner left a live 15-second timer holding its
+  closure. Jest's open-handle detector caught it. Now cleared in a
+  `finally`.
+
+**Test infrastructure.** jest-expo, and the two auth harnesses from last
+session are now real tests rather than scratchpad scripts — plus new
+coverage for the multipart upload, whose classic failure (setting
+`Content-Type` by hand, so the boundary in the header is not the one in
+the body) is silent and server-side. `expo-asset` had to be declared
+directly: `expo-audio` needs it as a direct peer, the same floating-peer
+class as last session, and `expo-doctor` is what catches it.
+
+**Scope note.** UC7 and UC4 are P1/Phase 3 and were built while P0 still
+has UC38 (edit) and UC39 (delete) open, against the working agreement in
+`CLAUDE.md`. Built as asked; flagging it because UC38 is what a
+`needs_review` flag is supposed to send you to, and it does not exist
+yet — the flag currently points nowhere.
+
+**Verified:** 126 backend tests, 29 mobile tests, `ruff`/`black` clean,
+`tsc --noEmit` clean, `expo-doctor` 21/21, `expo install --check` up to
+date.
+
+**Not verified:** anything on a device. Migration 003 has not been run,
+the `shelf-audio` bucket does not exist yet, and `WHISPER_API_KEY` is
+unset — so the voice path has never completed once end to end.
+
+### 23 August 2026 (later) — English only, migration 003, and a bucket that would have rejected every capture
+
+**O4 closed.** Not answered — the premise is gone. The user speaks only
+English, so there is no code-switching to transcribe and no Hinglish
+quality to measure. `language=en` now goes on every Whisper call (D23):
+Whisper's detection is a guess from the first seconds of audio, and a
+wrong guess does not error, it returns fluent nonsense in the language it
+picked. The confidence floor went 0.55 → 0.75 with it — the low value
+existed to avoid flagging every code-switched capture, and with one known
+language a score under 0.75 now means bad audio, which is what
+`needs_review` should have been catching all along.
+
+Stale O4 references cleared out of the migration comment, `db.py`,
+`main.py` and two test files, so the column comments no longer claim to
+feed a question nobody is asking.
+
+**Migration 003 applied.** Checked first: 001 and 002 were on, 003 was
+not, and `shelf.items` held 2 rows. Applied inside a transaction because
+`create type` is not idempotent and a partial apply would leave the file
+un-rerunnable. Verified after: enum `('on_device','cloud','none')`,
+`transcript_source not null default 'none'`, `transcript_confidence`
+float4 nullable, partial index `items_audio_idx`, and both existing rows
+backfilled to `'none'` — which is the honest value for captures that were
+typed.
+
+**The bucket already existed, and it would have rejected every voice
+capture.** `shelf-audio` was created 22 Aug: private, 10MB limit,
+`allowed_mime_types` of `audio/mp4, audio/mpeg, audio/ogg, audio/webm,
+audio/wav, audio/aac`. Nothing was duplicated.
+
+But the recorder reports Android's `.m4a` recordings as `audio/m4a`,
+which is not a registered type and is not on that list. Probed it
+directly rather than reasoning about it:
+
+```
+audio/m4a    -> 400 {"statusCode":"415","error":"invalid_mime_type"}
+audio/x-m4a  -> 400 invalid_mime_type
+audio/mp4    -> 200
+audio/3gpp   -> 400 invalid_mime_type
+```
+
+So the very first real capture would have come back 503 "Could not save
+the recording" — with the file correctly still on the device, which is at
+least the failure mode D21 intended, but for entirely the wrong reason.
+
+Fixed by making the *extension* the single source of truth: the resolved
+extension picks the MIME type the upload declares, so a client can report
+whichever spelling its platform prefers and the object still lands as
+`audio/mp4`. The `mimetypes` fallback is gone with it — it resolved
+`audio/3gpp` happily, which only moved the refusal from a clear 400 to an
+opaque storage error. `MAX_AUDIO_BYTES` dropped 25MB → 10MB to match the
+bucket's own limit, for the same reason: a server guard the store
+overrules turns "too long" into something the user cannot act on.
+
+**Verified end to end against the live bucket**, through `storage.py`
+rather than around it: upload declaring `audio/m4a` → stored as
+`audio/mp4`, signed URL fetched, 88 bytes back byte-identical, `audio/3gpp`
+refused at the edge, object deleted, bucket confirmed empty afterwards.
+
+137 backend tests, 29 mobile tests, lint and typecheck clean.
+
+**Still blocking a real capture:** `WHISPER_API_KEY` is unset, so
+transcription would fail — a capture would be stored with its audio and
+no words, which is UC42 working as designed but is not a working feature.
+
+### 23 August 2026 (later still) — transcription moved to Groq
+
+It was pointed at OpenAI. The module was written provider-agnostic
+against the OpenAI-compatible `/audio/transcriptions` shape, but the
+defaults were `api.openai.com/v1` and `whisper-1`, so as configured it
+was OpenAI. Now Groq (D24).
+
+Checked the endpoint rather than assuming it: base
+`https://api.groq.com/openai/v1`, `language` accepted as ISO-639-1, and —
+the part that actually mattered — `verbose_json` really does return
+`segments` with `avg_logprob` and `no_speech_prob`. That is what the
+confidence score is computed from, so if Groq had not returned segments
+the whole `needs_review` path would have quietly become dead code. It
+does, so the scoring is unchanged.
+
+**Model: `whisper-large-v3`, not turbo.** Turbo is the one that makes the
+"10x cheaper" figure true ($0.04/hr against OpenAI's $0.36); large-v3 is
+$0.111/hr, about 3x. Turbo is a distilled variant and slightly less
+accurate, and in this system the transcript *is* the captured thought —
+there is no second chance to hear it. The gap between the two is about
+$0.06 a month. `GROQ_MODEL=whisper-large-v3-turbo` switches it if that
+trade ever looks different.
+
+**Groq bills a 10-second minimum per request.** Most captures are
+shorter, so per-capture cost does not fall below 10 seconds however brief
+the recording. The ~$0.09/month estimate already assumes it; the earlier
+$0.90 OpenAI figure did not need to, since OpenAI bills by the second.
+
+Env vars renamed `WHISPER_*` → `GROQ_*` so the key says whose it is. The
+live `.env` had no `WHISPER_*` lines to migrate — the key was never set —
+so the block was added fresh. `CLAUDE.md`'s stack table said "Android
+on-device SpeechRecognizer primary; cloud Whisper fallback", which has
+been wrong since D20; corrected to name Groq and point at D20.
+
+One robustness fix found while wiring it: the transcriber was being
+handed the client's reported content type and a filename built by slicing
+the last four characters off the storage key. Both are now taken from the
+resolved `StoredAudio` — the extension is what tells the transcriber how
+to decode the audio, `audio/m4a` is not a registered type, and the slice
+gets `.webm` wrong.
+
+140 backend tests, lint clean. **Not verified against Groq**: no
+`GROQ_API_KEY` is set, so no real transcription has run.
+
+### 23 August 2026 (last) — turbo, and retrying a 429
+
+Most of this had already landed in the previous entry — Groq, `language=en`,
+`GROQ_API_KEY`. Two things actually changed.
+
+**Model is now `whisper-large-v3-turbo`.** The earlier entry picked
+large-v3 on the reasoning that the transcript *is* the captured thought
+and $0.06/month was not worth trading accuracy for. That reasoning was
+built on the wrong premise: the free tier covers this volume outright, so
+neither model costs anything. With cost off the table the choice is
+latency, and turbo is the faster one. `GROQ_MODEL=whisper-large-v3`
+switches back if transcripts disappoint.
+
+**A 429 is now retried rather than surrendered (D25).** Worth being
+precise about what this changes: a failed transcription never failed the
+capture — the row and the audio are written before the transcriber is
+called, so the capture survived as `parse_status = 'failed'` with no
+words (UC42). The safety net was already there. What was missing was any
+attempt to avoid needing it.
+
+Three attempts, full-jitter backoff from 1s, honouring `retry-after` when
+the server sends a sane one. Retried: 429, 408, 5xx, dropped connections.
+Not retried: 400/401/413/415 — they will say the same thing twice — and a
+200 carrying non-JSON, which is a broken host rather than a busy one.
+
+The part that needed care is the deadline. Three attempts at a 60s
+per-request timeout is 180s, and the app gives up at 90s
+(`mobile/lib/api.ts`). Retrying past that converts a recoverable failure
+into one the app has already stopped waiting for: the audio would still
+be safe, but the user would be told the server was unreachable rather
+than that the words did not come. So the whole call is bounded at 75s,
+each attempt gets whatever is left of it, and a retry is only taken if
+enough budget remains for the attempt to finish.
+
+That last clause came out of a failing test. The first version checked
+only `wait < remaining`, which would sleep 0.9s of a 1.0s budget and then
+fire a request that could not possibly complete — buying nothing and
+making the caller wait for it. There is now a 2s reserve.
+
+**The two Groq limits, neither of which binds here.** The 10-second
+minimum per request means a 3-second capture bills as 10; irrelevant
+while the free tier covers the volume, and it would only matter on a paid
+tier with very short, very frequent captures. The 25MB free-tier upload
+cap sits above `MAX_AUDIO_BYTES` (10MB, matched to the storage bucket)
+and well above what `MAX_RECORDING_MS` can produce — two minutes of AAC
+is under 2MB. The bucket is the binding limit, not Groq. Both are now
+recorded next to the constant rather than only in a decision.
+
+164 backend tests, 29 mobile tests, lint and typecheck clean.
+
+**Still not verified against Groq:** no `GROQ_API_KEY` is set, so the
+retry path has been exercised against stubs and never against a real 429.
+
+### 23 August 2026 — first real capture, end to end
+
+`GROQ_API_KEY` landed, so the voice path ran for real for the first time.
+
+**Migration 003 and the bucket were already done** earlier today and were
+re-verified rather than re-applied — 003 is not idempotent (`create type`
+has no `if not exists`), so re-running it would have errored rather than
+no-opped. Columns, enum and partial index all present; `shelf-audio`
+private, 10MB cap, created 22 Aug in Studio. Nothing duplicated.
+
+Confirmed the bucket accepts what the app actually sends: the recorder
+reports `audio/m4a`, the server canonicalises to `audio/mp4`, and only
+the latter is on the bucket's allow-list — the raw spelling is still
+rejected, which is exactly why that normalisation exists. No format the
+API accepts would be refused by the bucket, and the server's 10MB cap
+equals the bucket's, so the server refuses first and the error stays
+legible.
+
+**The recording was real**, not a stub blob: `espeak-ng` synthesised the
+phrase and `ffmpeg` encoded it to mono 44.1kHz AAC in an MPEG-4
+container — the same shape `expo-audio`'s HIGH_QUALITY preset produces on
+Android. 4.68s, 83,707 bytes. (Both tools were installed on the VPS for
+this; neither is a runtime dependency.)
+
+Spoken:  *"Remind me to call the insurance people tomorrow at three in
+the afternoon."*
+Groq returned: *"Remind me to call the insurance people tomorrow at 3 in
+the afternoon."*
+
+Only "three" → "3", which is Whisper's own number normalisation. Turbo
+was accurate enough that the accuracy worry behind the original
+large-v3 choice looks unfounded on clean English.
+
+The rest of the chain, all in **1.57 seconds** through Caddy:
+
+- object in the bucket, 83,707 bytes, `mimetype=audio/mp4`
+- row written: `kind=task`, `state=active`, `parse_status=ok`,
+  `source=voice`, `parsed_text='Call insurance company'`
+- `due_at = 2026-08-24 09:30 UTC` — tomorrow 15:00 IST. D15's timezone
+  handling holding all the way through a live capture, which is the bug
+  that would otherwise have made every reminder 5.5 hours wrong
+- `transcript_source='cloud'`, `transcript_confidence=0.874729` — above
+  the 0.75 floor, so `parse_status` stayed `ok` rather than
+  `needs_review`, which is D22/D23 behaving as intended
+- `GET /items/{id}/audio` signed a URL, the fetch came back 200 with
+  `content-type: audio/mp4` and a **byte-identical sha256**; the same
+  endpoint without a token returned 401
+- no retries and no warnings in the log — the D25 backoff was never
+  needed, so it remains stub-tested only
+
+The item correctly did *not* appear on `Today`: it is due tomorrow, and
+D17 bounds the list at the end of the user's day. The pre-existing typed
+item showed `has_audio: false`.
+
+**Cleaned up:** row deleted, object deleted, `shelf.items` back to its
+prior 2 rows, bucket empty at every prefix.
+
+**Still not verified:** the app itself. Every part of this went through
+`curl`, so the recorder, the hold-to-record gesture, the permission
+prompt and the playback button have still never run on a phone.

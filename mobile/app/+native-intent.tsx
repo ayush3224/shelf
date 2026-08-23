@@ -25,8 +25,24 @@ import { completeAuthRedirect, isAuthCallbackUrl } from '../lib/auth';
  */
 const COLD_START_EXCHANGE_TIMEOUT_MS = 15_000;
 
-function timeout(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Race `work` against the clock, always clearing the timer.
+ *
+ * The clear matters: without it the winner leaves a live timer behind that
+ * fires into nothing 15 seconds later, holding its closure the whole time.
+ */
+async function withTimeout(work: Promise<unknown>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      work,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 export async function redirectSystemPath({
@@ -52,10 +68,10 @@ export async function redirectSystemPath({
   // place left that can do it.
   if (initial) {
     // expo-router's docs are explicit that throwing here can crash the app.
-    await Promise.race([
+    await withTimeout(
       completeAuthRedirect(path).catch(() => undefined),
-      timeout(COLD_START_EXCHANGE_TIMEOUT_MS),
-    ]);
+      COLD_START_EXCHANGE_TIMEOUT_MS,
+    );
   }
 
   return null;

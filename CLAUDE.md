@@ -48,7 +48,7 @@ accurate, it is the wrong feature. Push back on it.
 | Backend    | FastAPI (Python) on Railway |
 | DB / Auth / Storage | Supabase (Postgres, Auth, Storage for audio) |
 | LLM        | Claude `claude-haiku-4-5` via the Anthropic API |
-| STT        | Android on-device `SpeechRecognizer` primary; cloud Whisper fallback |
+| STT        | Whisper (`whisper-large-v3-turbo`) on Groq, free tier. On-device `SpeechRecognizer` was dropped — see D20 |
 | Scheduler  | Railway cron, 1-minute tick |
 | Calendar   | Google Calendar API (OAuth) — phase 5 |
 | Voice call | CallMeBot — phase 6, optional |
