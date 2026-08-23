@@ -306,6 +306,220 @@ class Database:
             columns = [c.name for c in result.description or []]
             return [dict(zip(columns, row)) for row in await result.fetchall()]
 
+    async def get_item(self, item_id: str, user_id: str) -> Optional[dict[str, Any]]:
+        """One item in full, for the detail screen (UC37, UC38).
+
+        Returns more than `Today` does: the raw transcript, which is what UC38
+        edits against, and the transcription provenance, which is what explains
+        a flagged row to the person looking at it.
+
+        Args:
+            item_id: Item to load.
+            user_id: Owner; scoping this is what stops a guessed id reading
+                someone else's capture.
+
+        Returns:
+            The row, or None if this user has no such item.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                SELECT id::text,
+                       coalesce(nullif(parsed_text, ''), raw_text) AS text,
+                       raw_text,
+                       parsed_text,
+                       kind::text,
+                       state::text,
+                       due_at,
+                       critical,
+                       parse_status::text,
+                       source::text,
+                       audio_path IS NOT NULL AS has_audio,
+                       transcript_source::text,
+                       transcript_confidence,
+                       created_at,
+                       updated_at
+                  FROM {settings.db_schema}.items
+                 WHERE id = %s AND user_id = %s
+                """,
+                (item_id, user_id),
+            )
+            columns = [c.name for c in result.description or []]
+            row = await result.fetchone()
+            return dict(zip(columns, row)) if row else None
+
+    async def update_item(
+        self,
+        item_id: str,
+        user_id: str,
+        text: Optional[str] = None,
+        due_at: Optional[datetime] = None,
+        update_due: bool = False,
+    ) -> Optional[dict[str, Any]]:
+        """Correct a mis-parsed item (UC38).
+
+        Edits land on `parsed_text`, never `raw_text` (D14): the transcript is
+        what the user actually said, and rewriting it would leave them unable
+        to see what the model misheard.
+
+        Changing the due time re-derives the state, because `due_at` is what
+        decides it (UC12) — adding the time a parse missed should put the item
+        on `Today`, and clearing it should shelve it. That only applies to
+        `active` and `shelved`; an edit must not resurrect something `done` or
+        `dropped`, which would be a surprise rather than a correction. Any
+        resulting move is logged with reason `manual`, because a state change
+        nobody recorded is a hole in the data O1 and O2 get tuned from.
+
+        Args:
+            item_id: Item to correct.
+            user_id: Owner; the update is scoped to them.
+            text: New display text, or None to leave it.
+            due_at: New due time. Only read when `update_due` is set.
+            update_due: Whether `due_at` is being changed at all — the flag is
+                what separates "clear the time" from "leave the time alone",
+                which None cannot express on its own.
+
+        Returns:
+            The updated row, or None if this user has no such item.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                WITH prev AS (
+                    SELECT id, state
+                      FROM {settings.db_schema}.items
+                     WHERE id = %(item_id)s AND user_id = %(user_id)s
+                ),
+                target AS (
+                    SELECT prev.id,
+                           prev.state AS from_state,
+                           CASE
+                             WHEN NOT %(update_due)s THEN prev.state
+                             WHEN prev.state NOT IN ('active', 'shelved')
+                               THEN prev.state
+                             WHEN %(due_at)s::timestamptz IS NOT NULL
+                               THEN 'active'::{settings.db_schema}.item_state
+                             ELSE 'shelved'::{settings.db_schema}.item_state
+                           END AS to_state
+                      FROM prev
+                ),
+                upd AS (
+                    UPDATE {settings.db_schema}.items i
+                       SET parsed_text = coalesce(%(text)s, i.parsed_text),
+                           due_at = CASE
+                             WHEN %(update_due)s THEN %(due_at)s::timestamptz
+                             ELSE i.due_at
+                           END,
+                           state = target.to_state
+                      FROM target
+                     WHERE i.id = target.id
+                    RETURNING i.id
+                ),
+                logged AS (
+                    INSERT INTO {settings.db_schema}.transitions
+                      (item_id, from_state, to_state, reason)
+                    SELECT target.id, target.from_state, target.to_state, 'manual'
+                      FROM target JOIN upd ON upd.id = target.id
+                     WHERE target.from_state IS DISTINCT FROM target.to_state
+                )
+                SELECT target.from_state::text FROM target
+                """,
+                {
+                    "item_id": item_id,
+                    "user_id": user_id,
+                    "text": text,
+                    "due_at": due_at,
+                    "update_due": update_due,
+                },
+            )
+            if await result.fetchone() is None:
+                return None
+
+        return await self.get_item(item_id, user_id)
+
+    async def set_state(self, item_id: str, user_id: str, state: str) -> Optional[str]:
+        """Move an item between states by hand (UC21).
+
+        The escape hatch for when behaviour got it wrong. Logged with reason
+        `manual` so that decay-driven moves stay distinguishable from
+        user-driven ones — the whole point of O1 and O2 is telling them apart.
+
+        Idempotent: setting the state an item is already in writes no
+        transition.
+
+        Args:
+            item_id: Item to move.
+            user_id: Owner; the update is scoped to them.
+            state: Target state.
+
+        Returns:
+            The state the item was in before, or None if no such item.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                WITH prev AS (
+                    SELECT id, state
+                      FROM {settings.db_schema}.items
+                     WHERE id = %s AND user_id = %s
+                ),
+                upd AS (
+                    UPDATE {settings.db_schema}.items
+                       SET state = %s
+                     WHERE id = (SELECT id FROM prev)
+                       AND state <> %s
+                    RETURNING id
+                ),
+                logged AS (
+                    INSERT INTO {settings.db_schema}.transitions
+                      (item_id, from_state, to_state, reason)
+                    SELECT prev.id, prev.state, %s, 'manual'
+                      FROM prev JOIN upd ON upd.id = prev.id
+                )
+                SELECT prev.state::text FROM prev
+                """,
+                (item_id, user_id, state, state, state),
+            )
+            row = await result.fetchone()
+            return row[0] if row else None
+
+    async def delete_item(
+        self, item_id: str, user_id: str
+    ) -> tuple[bool, Optional[str]]:
+        """Delete an item permanently (UC39).
+
+        Returns the audio key so the caller can remove the object too. The row
+        goes first on purpose: an orphaned object costs storage, whereas a row
+        pointing at an object that is already gone is a detail screen that
+        cannot play its own recording.
+
+        `transitions` rows cascade with the item. That loses a little of the
+        history O1 and O2 are tuned from, but keeping audit rows for an item
+        the user asked to erase is not what "delete permanently" means.
+
+        Args:
+            item_id: Item to delete.
+            user_id: Owner; the delete is scoped to them.
+
+        Returns:
+            Whether a row was deleted, and its audio key if it had one.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                DELETE FROM {settings.db_schema}.items
+                 WHERE id = %s AND user_id = %s
+                RETURNING audio_path
+                """,
+                (item_id, user_id),
+            )
+            row = await result.fetchone()
+            return (True, row[0]) if row else (False, None)
+
     async def mark_done(self, item_id: str, user_id: str) -> Optional[str]:
         """Mark an item done and log the transition (UC16).
 

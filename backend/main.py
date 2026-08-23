@@ -111,6 +111,66 @@ class AudioUrlResponse(BaseModel):
     expires_in: int
 
 
+class ItemDetail(BaseModel):
+    """One item in full (UC37, UC38).
+
+    Carries both texts: `text` is what is displayed and edited, `raw_text` is
+    the transcript it was derived from. UC38 needs to show the second to make
+    sense of a bad first (D14).
+    """
+
+    id: str
+    text: str
+    raw_text: str
+    parsed_text: Optional[str] = None
+    kind: str
+    state: str
+    due_at: Optional[datetime] = None
+    critical: bool
+    parse_status: str
+    source: str
+    has_audio: bool
+    transcript_source: str
+    transcript_confidence: Optional[float] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ItemUpdate(BaseModel):
+    """Body for PATCH /items/{item_id} (UC38).
+
+    Both fields are optional and absence means "leave it". `due_at: null` is
+    therefore different from omitting `due_at`: the first clears the time, the
+    second does not touch it. `model_fields_set` is what tells them apart.
+    """
+
+    text: Optional[str] = Field(default=None, min_length=1)
+    due_at: Optional[datetime] = None
+
+
+class StateChange(BaseModel):
+    """Body for POST /items/{item_id}/state (UC21)."""
+
+    state: str
+
+
+class StateResponse(BaseModel):
+    """Response for a hand-made state move (UC21)."""
+
+    id: str
+    state: str
+    previous: str
+    changed: bool
+
+
+class DeleteResponse(BaseModel):
+    """Response for DELETE /items/{item_id} (UC39)."""
+
+    id: str
+    deleted: bool
+    audio_deleted: bool
+
+
 class TodayItem(BaseModel):
     """One row of the `Today` list.
 
@@ -197,6 +257,7 @@ async def health(db: Database = Depends(get_db)) -> HealthResponse:
 
 
 SOURCES = ("voice", "text", "widget")
+STATES = ("active", "shelved", "done", "dropped")
 
 
 def _require_source(source: str) -> str:
@@ -690,6 +751,186 @@ async def items_today(
         as_of=now,
         items=[TodayItem(**row, overdue=row["due_at"] <= now) for row in rows],
     )
+
+
+# Declared after `/items/today` on purpose: FastAPI matches in order, and a
+# `{item_id}` route placed first would swallow the literal and 422 on "today".
+
+
+@app.get("/items/{item_id}", response_model=ItemDetail)
+async def item_detail(
+    item_id: UUID,
+    db: Database = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+) -> ItemDetail:
+    """One item in full (UC37), which is what UC38 edits against.
+
+    Args:
+        item_id: Item to load.
+        db: Database connection.
+        user_id: Authenticated user, from the Supabase token.
+
+    Returns:
+        The item, including the raw transcript and its provenance.
+
+    Raises:
+        HTTPException: 404 if this user has no such item.
+    """
+    try:
+        row = await db.get_item(str(item_id), user_id)
+    except Exception as e:
+        logger.error("Failed to load item %s: %s", item_id, e)
+        raise HTTPException(status_code=500, detail="Failed to load item")
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="No such item")
+    return ItemDetail(**row)
+
+
+@app.patch("/items/{item_id}", response_model=ItemDetail)
+async def edit_item(
+    item_id: UUID,
+    request: ItemUpdate,
+    db: Database = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+) -> ItemDetail:
+    """Correct a mis-parsed item (UC38).
+
+    The edit lands on `parsed_text`; `raw_text` is never rewritten (D14).
+    Changing the due time re-derives the state, because `due_at` is what
+    decides it (UC12) — the common repair is a parse that missed a time, and
+    leaving such an item shelved after the time is supplied would be the wrong
+    answer. Terminal states are left alone.
+
+    Args:
+        item_id: Item to correct.
+        request: The fields to change. Omitting `due_at` leaves the time as it
+            is; sending `null` clears it.
+        db: Database connection.
+        user_id: Authenticated user, from the Supabase token.
+
+    Returns:
+        The item as it now stands, so the caller can announce any state move.
+
+    Raises:
+        HTTPException: 400 if nothing was sent, 404 if no such item.
+    """
+    fields = request.model_fields_set
+    if not fields:
+        raise HTTPException(status_code=400, detail="Nothing to change")
+
+    text = request.text.strip() if request.text is not None else None
+    if text is not None and not text:
+        raise HTTPException(status_code=400, detail="text cannot be blank")
+
+    try:
+        row = await db.update_item(
+            item_id=str(item_id),
+            user_id=user_id,
+            text=text,
+            due_at=request.due_at,
+            update_due="due_at" in fields,
+        )
+    except Exception as e:
+        logger.error("Failed to update item %s: %s", item_id, e)
+        raise HTTPException(status_code=500, detail="Failed to update item")
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="No such item")
+    return ItemDetail(**row)
+
+
+@app.post("/items/{item_id}/state", response_model=StateResponse)
+async def move_item(
+    item_id: UUID,
+    request: StateChange,
+    db: Database = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+) -> StateResponse:
+    """Move an item between states by hand (UC21).
+
+    The escape hatch for when behaviour got it wrong. Logged with reason
+    `manual` so decay-driven moves stay distinguishable from user-driven ones.
+
+    Args:
+        item_id: Item to move.
+        request: The target state.
+        db: Database connection.
+        user_id: Authenticated user, from the Supabase token.
+
+    Returns:
+        Where it went and where it came from; `changed` is False if it was
+        already there.
+
+    Raises:
+        HTTPException: 400 on an unknown state, 404 if no such item.
+    """
+    if request.state not in STATES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"state must be one of {', '.join(STATES)}",
+        )
+
+    try:
+        previous = await db.set_state(str(item_id), user_id, request.state)
+    except Exception as e:
+        logger.error("Failed to move item %s: %s", item_id, e)
+        raise HTTPException(status_code=500, detail="Failed to update item")
+
+    if previous is None:
+        raise HTTPException(status_code=404, detail="No such item")
+
+    return StateResponse(
+        id=str(item_id),
+        state=request.state,
+        previous=previous,
+        changed=previous != request.state,
+    )
+
+
+@app.delete("/items/{item_id}", response_model=DeleteResponse)
+async def remove_item(
+    item_id: UUID,
+    db: Database = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+) -> DeleteResponse:
+    """Delete an item and its recording permanently (UC39).
+
+    The row goes first, then the object. That order is deliberate: a failed
+    object delete leaves storage to pay for, while a failed row delete would
+    leave an item whose recording is already gone — and "keep the audio" is
+    the promise the rest of this system is built on (UC42), so the state that
+    breaks it is the worse one to risk.
+
+    Args:
+        item_id: Item to delete.
+        db: Database connection.
+        user_id: Authenticated user, from the Supabase token.
+
+    Returns:
+        Whether the row went, and whether an object went with it.
+
+    Raises:
+        HTTPException: 404 if this user has no such item.
+    """
+    try:
+        deleted, audio_path = await db.delete_item(str(item_id), user_id)
+    except Exception as e:
+        logger.error("Failed to delete item %s: %s", item_id, e)
+        raise HTTPException(status_code=500, detail="Failed to delete item")
+
+    if not deleted:
+        raise HTTPException(status_code=404, detail="No such item")
+
+    audio_deleted = False
+    if audio_path:
+        # Best effort, and it never raises: the item is already gone, so
+        # failing the request now would report a delete that did happen as one
+        # that did not.
+        await delete_audio(audio_path)
+        audio_deleted = True
+
+    return DeleteResponse(id=str(item_id), deleted=True, audio_deleted=audio_deleted)
 
 
 @app.post("/items/{item_id}/done", response_model=DoneResponse)

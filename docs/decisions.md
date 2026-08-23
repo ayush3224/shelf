@@ -274,6 +274,41 @@ compensate.
 *Revisit if:* a format arrives that the sniffer does not recognise; it returns
 None rather than guessing, and the filename still carries it.
 
+**D29 — An edit re-derives state, except from a terminal one.**
+UC12 says `due_at` decides the state, and the commonest thing UC38 repairs is a
+parse that missed a time — so supplying that time and leaving the item shelved
+would be the wrong answer to the correction the user just made. Clearing the
+time shelves it again, symmetrically.
+`done` and `dropped` are exempt. An edit to the wording of a finished item
+should not un-finish it; resurrecting something is a decision, and UC21's chips
+are where decisions get made. Any move an edit does cause is logged with reason
+`manual` — a state change nobody recorded is a hole in the data O1 and O2 get
+tuned from.
+*Revisit if:* corrections start being made mostly on terminal items, which
+would mean the review deck is surfacing the wrong things.
+
+**D30 — Delete removes the row first, the object second.**
+A failed object delete leaves storage to pay for. A failed row delete would
+leave an item whose recording is already gone — and "the audio is never lost"
+(UC42) is the promise the rest of the system is built on, so that is the worse
+state to risk. The object delete is best-effort and never raises: the row is
+already gone by then, and failing the request would report a delete that did
+happen as one that did not, sending the user to try again on nothing.
+`transitions` rows cascade with the item. That loses a little of the history
+the decay constants are tuned from, but keeping an audit trail for something
+the user asked to erase is not what "delete permanently" means.
+
+**D31 — Finishing an item moved from the row to the check circle.**
+Tapping anywhere on a `Today` row used to mark it done. The row title is now
+the way into the detail screen, and a row that both finishes and navigates
+cannot do either predictably — so `done` is the circle, the title opens, and
+the play button plays. Three targets, each with its own affordance.
+This costs UC16 a little precision, which is why the circle carries a generous
+`hitSlop`. It buys UC38 and UC39 a way in that does not need a long-press or a
+swipe to discover.
+*Revisit if:* finishing an item starts feeling fiddly in daily use — the answer
+would be a swipe for done, not putting navigation back on the whole row.
+
 ---
 
 ## Open

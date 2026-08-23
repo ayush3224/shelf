@@ -37,6 +37,9 @@ function RootNavigator() {
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Protected guard={!!session}>
         <Stack.Screen name="(tabs)" />
+        {/* Item detail sits outside the tabs: it is reached from a row, and
+            giving it a tab would make it a place rather than a detour. */}
+        <Stack.Screen name="item/[id]" />
       </Stack.Protected>
       <Stack.Protected guard={!session}>
         <Stack.Screen name="sign-in" />

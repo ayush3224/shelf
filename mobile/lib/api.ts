@@ -332,6 +332,83 @@ export function markDone(itemId: string): Promise<DoneResponse> {
   return request<DoneResponse>(`/items/${itemId}/done`, { method: 'POST' });
 }
 
+// ------------------------------------------------------------- item detail
+
+export type ItemState = 'active' | 'shelved' | 'done' | 'dropped';
+
+export type ItemDetail = {
+  id: string;
+  /** What is displayed and edited. */
+  text: string;
+  /** The transcript it came from. Never rewritten (D14). */
+  raw_text: string;
+  parsed_text: string | null;
+  kind: 'task' | 'note' | 'person_note';
+  state: ItemState;
+  due_at: string | null;
+  critical: boolean;
+  parse_status: 'ok' | 'failed' | 'needs_review';
+  source: 'voice' | 'text' | 'widget';
+  has_audio: boolean;
+  transcript_source: 'on_device' | 'cloud' | 'none';
+  transcript_confidence: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+/** One item in full (UC37). */
+export function item(itemId: string): Promise<ItemDetail> {
+  return request<ItemDetail>(`/items/${itemId}`);
+}
+
+/**
+ * Correct a mis-parsed item (UC38).
+ *
+ * Omitting `due_at` leaves the time alone; passing `null` clears it. The
+ * distinction is real — `undefined` and `null` mean different things here —
+ * so the field is only sent when the caller actually set it.
+ */
+export function editItem(
+  itemId: string,
+  changes: { text?: string; due_at?: string | null },
+): Promise<ItemDetail> {
+  const body: Record<string, unknown> = {};
+  if (changes.text !== undefined) body.text = changes.text;
+  if ('due_at' in changes) body.due_at = changes.due_at;
+
+  return request<ItemDetail>(`/items/${itemId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  });
+}
+
+export type StateResponse = {
+  id: string;
+  state: ItemState;
+  previous: ItemState;
+  changed: boolean;
+};
+
+/** Move an item between states by hand (UC21). */
+export function setItemState(itemId: string, state: ItemState): Promise<StateResponse> {
+  return request<StateResponse>(`/items/${itemId}/state`, {
+    method: 'POST',
+    body: JSON.stringify({ state }),
+  });
+}
+
+export type DeleteResponse = {
+  id: string;
+  deleted: boolean;
+  /** Whether a recording went with it (UC39). */
+  audio_deleted: boolean;
+};
+
+/** Delete an item and its recording permanently (UC39). */
+export function deleteItem(itemId: string): Promise<DeleteResponse> {
+  return request<DeleteResponse>(`/items/${itemId}`, { method: 'DELETE' });
+}
+
 // ------------------------------------------------------------------- audio
 
 export type AudioUrlResponse = { id: string; url: string; expires_in: number };

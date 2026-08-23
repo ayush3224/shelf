@@ -32,3 +32,33 @@ export function dueLabel(dueAt: string, now: Date = new Date()): string {
   const months = Math.floor(days / 30);
   return `${months} month${months === 1 ? '' : 's'} ago`;
 }
+
+
+const fullDateTime = new Intl.DateTimeFormat(undefined, {
+  weekday: 'short',
+  day: 'numeric',
+  month: 'short',
+  hour: 'numeric',
+  minute: '2-digit',
+});
+
+/** An absolute due label for the item detail, where there is room for one. */
+export function fullDueLabel(dueAt: string | null): string {
+  if (!dueAt) return 'No time — on the shelf';
+  const due = new Date(dueAt);
+  if (Number.isNaN(due.getTime())) return 'No time — on the shelf';
+  return fullDateTime.format(due);
+}
+
+const dateOnly = new Intl.DateTimeFormat(undefined, {
+  day: 'numeric',
+  month: 'short',
+  year: 'numeric',
+});
+
+/** When an item was captured, for the detail screen's footer. */
+export function capturedLabel(createdAt: string): string {
+  const at = new Date(createdAt);
+  if (Number.isNaN(at.getTime())) return '';
+  return `${dateOnly.format(at)}, ${time.format(at)}`;
+}

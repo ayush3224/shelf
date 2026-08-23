@@ -148,14 +148,15 @@ off-site copy is still worth adding.
 | JWT auth, fail-closed | ✅ `/health` is the only public path |
 | Text capture + Haiku parse | ✅ kind, due date, critical, entities |
 | Timezone handling (IST) | ✅ tested — "tomorrow 3pm" → 09:30Z |
-| `GET /items/today`, `POST /items/{id}/done` | ⚠️ built, needs service restart |
+| `GET /items/today`, `POST /items/{id}/done` | ✅ live |
+| Item detail, edit, move, delete (UC37/38/21/39) | ✅ verified live |
 | Expo app: capture, today, sign-in | ⚠️ built, never run on a phone |
 | Voice capture, hold-to-record (UC1) | ⚠️ upload body fixed (D26); not yet re-run on a phone |
 | Audio stored + signed playback (UC7) | ✅ verified live, byte-identical |
 | Cloud transcription (UC8) | ✅ verified live — Groq turbo, 1.6s round trip |
 | Multi-item splitting (UC4) | ⚠️ built, never run against real Haiku |
-| Mobile test suite (jest-expo) | ✅ 61 tests |
-| Backend test suite | ✅ 184 tests |
+| Mobile test suite (jest-expo) | ✅ 73 tests |
+| Backend test suite | ✅ 210 tests |
 | Native dep tree vs SDK 57 matrix | ✅ reconciled, `expo-doctor` 21/21 |
 | Google OAuth redirect handling | ✅ callback swallowed, not routed |
 | Google OAuth config | ❌ not started |
@@ -859,3 +860,68 @@ now resolves to `.m4a` / `audio/mp4`, and a genuine MP3 still resolves to
 `audio/mpeg`. They play and they transcribed fine; renaming them means
 moving storage objects and rewriting `audio_path`, which is the user's
 data and their call. New captures will be correct.
+
+### 23 August 2026 — UC38 and UC39, and P0 is nearly closed
+
+Item detail: transcript beside the editable description, due-time
+picker, four state chips, playback, delete behind a confirmation.
+Reached by tapping a row title on `Today`.
+
+**Four endpoints.** `GET /items/{id}` (the detail, including the raw
+transcript UC38 edits against), `PATCH /items/{id}` (UC38),
+`POST /items/{id}/state` (UC21), `DELETE /items/{id}` (UC39). Declared
+after `/items/today` deliberately — FastAPI matches in order, and a
+`{item_id}` route placed first swallows the literal and 422s on "today".
+There is a test for exactly that, because it is the kind of thing that
+breaks silently when someone tidies the file.
+
+**`undefined` and `null` mean different things** on the due time, and the
+whole edit design rests on it: omitting `due_at` leaves the time alone,
+sending `null` clears it. Pydantic's `model_fields_set` separates them
+server-side and the client only writes the key when the caller set it. A
+client that collapsed the two would turn "fix the wording" into "and also
+shelve it".
+
+Setting a time re-derives the state, because `due_at` is what decides it
+(UC12) — the commonest repair is a parse that missed a time, and leaving
+that item shelved answers the wrong question. Terminal states are exempt:
+an edit must not un-finish something (D29).
+
+**Delete takes the recording with it** (D30), row first, object second.
+Verified against the live bucket rather than a stub: uploaded a real
+`.m4a`, played it back byte-identical through a signed URL, deleted, and
+watched the object list go from three entries to two — the user's two
+real captures untouched, the test object gone, signed URL 400, row 404.
+
+Also confirmed in the same run that D28 is holding in production: the
+upload declared `audio/m4a` and landed as `.m4a`, not `.mp3`.
+
+**Finishing an item moved from the row to the check circle** (D31). The
+title had to become the way into the detail screen, and a row that both
+finishes and navigates does neither predictably. The circle gets a
+generous `hitSlop` to pay back what UC16 loses.
+
+`useFocusEffect` on `Today` already reloads on focus, so an edit, a move
+or a delete is reflected on the way back with no extra wiring.
+
+**Live-checked the whole surface** through Caddy: text edit leaves
+`raw_text` alone, setting a time moves shelved → active, clearing it moves
+back, a repeat state move reports `changed: false`, an edit to a `done`
+item leaves it done, and all three transitions logged with reason
+`manual`. Bad inputs: empty body 400, blank text 400, unknown state 400,
+no token 401. Delete then 404 on both re-read and re-delete.
+
+210 backend tests (26 new), 73 mobile tests (12 new), lint and typecheck
+clean, `expo-doctor` 21/21 after adding the SDK-pinned
+`@react-native-community/datetimepicker`.
+
+**P0 is not quite closed.** UC38, UC39 and UC21 are done, but of the 19
+P0 use cases four remain and they are all one cluster: UC23 (push at due
+time), UC15 (done from the notification), UC17 (snooze) and UC18
+(auto-shelve after N ignores) — plus UC33 (browse the shelf) and UC34
+(search), which have no UI yet. The scheduler is Phase 2 and nothing here
+touches it.
+
+**Not verified on a phone.** The detail screen, the picker and the
+confirmation dialog have only been type-checked and unit-tested; every
+live check went through `curl`.

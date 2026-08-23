@@ -15,7 +15,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 
 import { ApiError, markDone, today } from '../../lib/api';
 import type { TodayItem } from '../../lib/api';
@@ -27,24 +27,33 @@ import { color, radius, space } from '../../lib/theme';
 type RowProps = {
   item: TodayItem;
   onDone: (id: string) => void;
+  onOpen: (id: string) => void;
   onPlay: (id: string) => void;
   playing: boolean;
   loadingAudio: boolean;
 };
 
-function Row({ item, onDone, onPlay, playing, loadingAudio }: RowProps) {
-  // The row is the done affordance (UC16, one tap). Playback is a separate
-  // target inside it so that reaching for the audio cannot finish the item by
-  // accident — the two gestures must not overlap.
+function Row({ item, onDone, onOpen, onPlay, playing, loadingAudio }: RowProps) {
+  // Three targets, each with its own affordance. Finishing an item used to be
+  // a tap anywhere on the row; it is now the circle, because the title had to
+  // become the way into the detail screen (UC38, UC39) and a row that both
+  // finishes and navigates cannot be either reliably.
   return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={`Mark done: ${item.text}`}
-      onPress={() => onDone(item.id)}
-      style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
-    >
-      <View style={styles.check} />
-      <View style={styles.rowBody}>
+    <View style={styles.row}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`Mark done: ${item.text}`}
+        hitSlop={12}
+        onPress={() => onDone(item.id)}
+        style={({ pressed }) => [styles.check, pressed && styles.checkPressed]}
+      />
+
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`Open: ${item.text}`}
+        onPress={() => onOpen(item.id)}
+        style={({ pressed }) => [styles.rowBody, pressed && styles.rowPressed]}
+      >
         <Text style={styles.rowText}>{item.text}</Text>
         <View style={styles.meta}>
           <Text style={[styles.due, item.overdue && styles.dueOverdue]}>
@@ -55,7 +64,7 @@ function Row({ item, onDone, onPlay, playing, loadingAudio }: RowProps) {
             <Text style={styles.flagged}>Check this</Text>
           ) : null}
         </View>
-      </View>
+      </Pressable>
 
       {item.has_audio ? (
         <Pressable
@@ -72,7 +81,7 @@ function Row({ item, onDone, onPlay, playing, loadingAudio }: RowProps) {
           )}
         </Pressable>
       ) : null}
-    </Pressable>
+    </View>
   );
 }
 
@@ -164,6 +173,7 @@ export default function Today() {
           <Row
             item={item}
             onDone={(id) => void done(id)}
+            onOpen={(id) => router.push(`/item/${id}`)}
             onPlay={(id) => void playback.toggle(id)}
             playing={playback.activeId === item.id && !playback.loading}
             loadingAudio={playback.activeId === item.id && playback.loading}
@@ -238,6 +248,7 @@ const styles = StyleSheet.create({
     padding: space.md,
   },
   rowPressed: { opacity: 0.6 },
+  checkPressed: { backgroundColor: color.border },
   check: {
     width: 22,
     height: 22,
