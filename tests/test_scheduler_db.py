@@ -12,9 +12,15 @@ where a real wait would be absurd (an hour between pushes, ninety days on the
 shelf) the timestamps are backdated on real rows instead, which is the same
 proof without the wait.
 
-The push service is stubbed. Delivery to a device is a separate check and
-cannot be made repeatable; what these tests are about is what the database
-does with the answer.
+The push service is stubbed, and stubbed *by default* — a test in this module
+cannot reach it by forgetting a fixture. That guard is not theoretical: the
+scheduler sweeps every row in its schema, so an earlier version of this suite
+run against the live one sent a real notification to the owner's phone and
+disabled their push token by pretending it was dead.
+
+Hence `conftest.py`: the suite builds its own schema from the same migrations
+and drops it afterwards, under a user that exists only while it runs. Nothing
+here can see the owner's items, and the owner's phone cannot see anything here.
 """
 
 import asyncio
@@ -27,37 +33,55 @@ from backend import push, scheduler
 from backend.config import settings
 from backend.db import Database
 from backend.push import PushTicket
+from tests.conftest import TEST_USER as USER
 
 pytestmark = pytest.mark.db
 
-USER = "ff2da522-413b-471e-aef1-8d5c614a52b4"
 TOKEN = "ExponentPushToken[db-test-token-do-not-use]"
 
-# Every row this module writes carries it, so cleanup can find them and a
-# human looking at the table knows what they are.
+# Every row this module writes carries it. The schema is thrown away anyway,
+# so this is for the human reading a table mid-run, not for cleanup.
 MARKER = "[scheduler-db-test]"
 
 
 # ------------------------------------------------------------------ setup
 
 
+@pytest.fixture(autouse=True)
+def never_reaches_the_push_service(monkeypatch):
+    """No test here may talk to Expo, whether or not it remembered to stub it.
+
+    A test that sends for real is not a flaky test, it is a notification on
+    somebody's phone and a token that may come back disabled. Forgetting the
+    stub should fail loudly rather than succeed quietly.
+    """
+
+    async def refuse(messages):
+        raise AssertionError(
+            "a db test tried to reach the real push service; "
+            "use the `delivers` fixture or stub `push.send` yourself"
+        )
+
+    monkeypatch.setattr(push, "send", refuse)
+
+
 @pytest.fixture
-async def db():
-    """A real database, with everything this module wrote removed afterwards."""
+async def db(scratch_schema):
+    """A real database, pointed at the suite's own schema.
+
+    `scratch_schema` is what makes this safe: the scheduler is not scoped to a
+    user, so anything it sweeps, it sweeps for real.
+    """
     database = Database()
     await database.connect()
     try:
         yield database
     finally:
         async with database.connection() as conn:
-            await conn.execute(
-                f"DELETE FROM {settings.db_schema}.items WHERE raw_text LIKE %s",
-                (f"{MARKER}%",),
-            )
-            await conn.execute(
-                f"DELETE FROM {settings.db_schema}.push_tokens WHERE token = %s",
-                (TOKEN,),
-            )
+            # Between tests, not for cleanup at the end — the schema goes with
+            # the session. Tests assert on counts, so they need an empty table.
+            await conn.execute(f"DELETE FROM {settings.db_schema}.items")
+            await conn.execute(f"DELETE FROM {settings.db_schema}.push_tokens")
         await database.disconnect()
 
 
@@ -209,6 +233,61 @@ async def age_the_push(db: Database, item_id: str) -> None:
             """,
             (settings.push_repeat_minutes + 1, item_id),
         )
+
+
+# --------------------------------------------------------------- the log
+
+
+async def test_a_quiet_tick_still_logs_that_it_ran(db, delivers, caplog):
+    """The regression that cost twenty minutes.
+
+    `run_once` used to log only when something moved, so a tick with nothing
+    to do printed nothing — indistinguishable from a tick that crashed before
+    it reached the database.
+    """
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="backend.scheduler"):
+        await scheduler.run_once()
+
+    assert "tick:" in caplog.text
+    assert "considered[" in caplog.text
+
+
+async def test_the_survey_explains_why_a_due_item_was_not_queued(db, delivers):
+    """One item due, one push already open, nothing to do — and it says so.
+
+    This is the shape of the confusion it exists to prevent: `due=1` with
+    `queued=0` looks broken until `open=1` explains it.
+    """
+    item_id = await make_item(
+        db, due_at=datetime.now(timezone.utc) - timedelta(minutes=1)
+    )
+    await register_device(db)
+
+    first = await scheduler.tick(db)
+    assert first.survey.due_now >= 1
+    assert first.queued >= 1
+
+    second = await scheduler.tick(db)
+
+    assert second.queued == 0, "already has one outstanding"
+    assert second.survey.due_now >= 1, "and it is still due"
+    assert second.survey.open_pushes >= 1, "which is the reason"
+    assert str(item_id)  # the row is the one under test
+
+
+async def test_the_survey_counts_devices_so_a_silent_send_is_explainable(db):
+    """No device is why nothing was sent — a fact, not an error (D32)."""
+    await make_item(db, due_at=datetime.now(timezone.utc) - timedelta(minutes=1))
+
+    result = await scheduler.tick(db)
+
+    assert result.survey.devices == 0
+    assert result.queued >= 1 and result.sent == 0
+    # Next tick sees the queued row with nowhere to go and says so.
+    following = await scheduler.tick(db)
+    assert following.undeliverable is True
 
 
 # ------------------------------------------------------- push at due time
