@@ -14,19 +14,89 @@ const TIMEOUT_MS = 30_000;
 /** An audio capture uploads a file, then waits on transcription and the parse. */
 const UPLOAD_TIMEOUT_MS = 90_000;
 
+/**
+ * Where a request died.
+ *
+ * The distinction that matters is `transport` versus `client`: one means the
+ * request left the device and the network refused it, the other means it never
+ * got that far. Collapsing them — which this client used to do — makes a
+ * malformed body indistinguishable from a flat tyre, and sends you looking at
+ * the server for a bug that is on the phone.
+ */
+export type ApiFailureKind =
+  | 'http' // the server answered, with a status we did not want
+  | 'timeout' // we stopped waiting
+  | 'transport' // dispatched, and the network failed it
+  | 'client'; // never dispatched — the request itself was the problem
+
 export class ApiError extends Error {
   readonly status: number;
+  readonly kind: ApiFailureKind;
+  /** The original throw, kept so it can be logged instead of guessed at. */
+  readonly cause: unknown;
+  /** One line naming the real failure. Shown under the friendly message. */
+  readonly diagnostic: string;
 
-  constructor(status: number, message: string) {
+  constructor(
+    status: number,
+    message: string,
+    kind: ApiFailureKind = 'http',
+    cause?: unknown,
+    diagnostic?: string,
+  ) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.kind = kind;
+    this.cause = cause;
+    this.diagnostic = diagnostic ?? describe(cause) ?? message;
   }
 
   /** The session is gone or was rejected; the caller should sign out. */
   get isAuthError(): boolean {
     return this.status === 401;
   }
+
+  /** True when the request never left the device. */
+  get isLocalFailure(): boolean {
+    return this.kind === 'client';
+  }
+}
+
+/** A one-line description of a thrown value, for logs and for the screen. */
+function describe(error: unknown): string | undefined {
+  if (error === undefined || error === null) return undefined;
+  if (error instanceof Error) {
+    const name = error.name || 'Error';
+    const nested = (error as { cause?: unknown }).cause;
+    const suffix = nested instanceof Error ? ` (caused by ${nested.name}: ${nested.message})` : '';
+    return `${name}: ${error.message}${suffix}`;
+  }
+  return String(error);
+}
+
+/**
+ * React Native reports a genuine transport failure as
+ * `TypeError: Network request failed`.
+ *
+ * It reports an unreadable file part in a multipart body the same way, because
+ * the native networking module raises the failure through the same channel. So
+ * this narrows the field; it does not settle it, which is why the recorder
+ * checks the file *before* handing it to `fetch` rather than trying to work
+ * out afterwards which of the two happened.
+ */
+function looksLikeTransportFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return /network request failed|unable to resolve host|connection (reset|refused|closed)|timed? ?out|tls|ssl/i.test(
+    message,
+  );
+}
+
+/** Log with a stable prefix so it is greppable in `adb logcat` / Expo logs. */
+function logFailure(path: string, error: unknown, kind: ApiFailureKind): void {
+  // console.error rather than a swallowed string: the whole reason this bug
+  // was invisible is that the original throw was discarded.
+  console.error(`[shelf/api] ${kind} failure on ${path}:`, describe(error), error);
 }
 
 async function accessToken(): Promise<string> {
@@ -86,19 +156,43 @@ async function request<T>(
         ...(options.multipart ? {} : { 'Content-Type': 'application/json' }),
       },
     });
-  } catch {
-    // Offline, DNS, TLS, or the 30s timeout. The queue that would survive this
-    // is UC6, phase 3; for now the caller keeps the text and says so.
-    throw new ApiError(
-      0,
-      controller.signal.aborted ? 'The server took too long.' : 'No connection.',
-    );
+  } catch (e) {
+    if (controller.signal.aborted) {
+      logFailure(path, e, 'timeout');
+      throw new ApiError(0, 'The server took too long.', 'timeout', e);
+    }
+    if (looksLikeTransportFailure(e)) {
+      // Offline, DNS, TLS. The queue that would survive this is UC6, phase 3;
+      // for now the caller keeps the capture and says so.
+      logFailure(path, e, 'transport');
+      throw new ApiError(0, 'No connection.', 'transport', e);
+    }
+    // Never dispatched: a body we could not build, a URI that would not
+    // resolve, something thrown inside fetch before the socket. Reporting this
+    // as "no connection" sends the reader to the wrong machine.
+    logFailure(path, e, 'client');
+    throw new ApiError(0, 'The app could not send that request.', 'client', e);
   } finally {
     clearTimeout(timer);
   }
 
-  if (!response.ok) throw new ApiError(response.status, await detail(response));
-  return (await response.json()) as T;
+  if (!response.ok) {
+    throw new ApiError(response.status, await detail(response), 'http');
+  }
+
+  try {
+    return (await response.json()) as T;
+  } catch (e) {
+    // A 200 whose body will not parse is the server's problem, not the
+    // network's, and saying "no connection" about it is a lie.
+    logFailure(path, e, 'http');
+    throw new ApiError(
+      response.status,
+      'The server sent something unreadable.',
+      'http',
+      e,
+    );
+  }
 }
 
 // ----------------------------------------------------------------- capture

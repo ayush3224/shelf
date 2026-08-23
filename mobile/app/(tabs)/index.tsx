@@ -64,6 +64,37 @@ function seconds(ms: number): string {
   return `${Math.floor(ms / 1000)}s`;
 }
 
+/**
+ * Say which machine the problem is on.
+ *
+ * The previous single message ("that recording did not reach the server") was
+ * true of every failure and useful for none of them: it read as a network
+ * fault whether the network was involved or not.
+ */
+function uploadFailureMessage(e: unknown): string {
+  if (!(e instanceof ApiError)) {
+    return `Something went wrong sending that recording. ${describeError(e)}`;
+  }
+
+  switch (e.kind) {
+    case 'client':
+      // Never dispatched. The recording is still on the device.
+      return `The app could not send that recording — it is still here. ${e.diagnostic}`;
+    case 'transport':
+      return 'No connection. The recording is still here — try again.';
+    case 'timeout':
+      return 'The server took too long. The recording is still here — try again.';
+    default:
+      return e.status === 503
+        ? `${e.message} Try again in a moment.`
+        : `The server refused that recording (${e.status}). ${e.message}`;
+  }
+}
+
+function describeError(e: unknown): string {
+  return e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+}
+
 export default function Capture() {
   const { signOut } = useAuth();
   const recorder = useRecorder();
@@ -120,11 +151,15 @@ export default function Capture() {
         },
       );
     } catch (e) {
-      setError(
-        e instanceof ApiError
-          ? `${e.message} Your words are still here — try again.`
-          : 'Something went wrong. Your words are still here — try again.',
-      );
+      // Same classification as the audio path: a request that never left the
+      // device should not be reported as the server being unreachable.
+      const why =
+        e instanceof ApiError && e.kind === 'client'
+          ? `The app could not send that. ${e.diagnostic}`
+          : e instanceof ApiError
+            ? e.message
+            : describeError(e);
+      setError(`${why} Your words are still here — try again.`);
     }
   }, [text, sending, settle]);
 
@@ -176,27 +211,31 @@ export default function Capture() {
       return;
     }
 
-    const recording = await recorder.stop();
+    const result = await recorder.stop();
     setWillCancel(false);
-    if (!recording) {
-      // Too short to be speech. Say what the gesture is rather than failing.
-      setNotice(`Hold the button while you speak — that was under ${
-        MIN_RECORDING_MS / 1000
-      }s.`);
+
+    if (result.outcome === 'too-short') {
+      // A tap, not a hold. Say what the gesture is rather than failing.
+      setNotice(
+        `Hold the button while you speak — that was under ${MIN_RECORDING_MS / 1000}s.`,
+      );
+      return;
+    }
+
+    if (result.outcome === 'unusable') {
+      // The recording never made it to disk. Nothing to do with the server,
+      // and saying otherwise is what sent the last investigation to the VPS.
+      setError(`${result.message} Nothing was sent.`);
       return;
     }
 
     try {
       await settle(
-        () => captureAudio(recording),
+        () => captureAudio(result.recording),
         () => undefined,
       );
     } catch (e) {
-      setError(
-        e instanceof ApiError && e.status === 503
-          ? `${e.message} Try again in a moment.`
-          : 'That recording did not reach the server. Try again.',
-      );
+      setError(uploadFailureMessage(e));
     }
   }, [recorder, settle]);
 

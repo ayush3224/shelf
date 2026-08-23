@@ -154,7 +154,7 @@ off-site copy is still worth adding.
 | Audio stored + signed playback (UC7) | ✅ verified live, byte-identical |
 | Cloud transcription (UC8) | ✅ verified live — Groq turbo, 1.6s round trip |
 | Multi-item splitting (UC4) | ⚠️ built, never run against real Haiku |
-| Mobile test suite (jest-expo) | ✅ 29 tests |
+| Mobile test suite (jest-expo) | ✅ 55 tests |
 | Backend test suite | ✅ 164 tests |
 | Native dep tree vs SDK 57 matrix | ✅ reconciled, `expo-doctor` 21/21 |
 | Google OAuth redirect handling | ✅ callback swallowed, not routed |
@@ -659,3 +659,91 @@ prior 2 rows, bucket empty at every prefix.
 **Still not verified:** the app itself. Every part of this went through
 `curl`, so the recorder, the hold-to-record gesture, the permission
 prompt and the playback button have still never run on a phone.
+
+### 23 August 2026 — "cannot reach the server" was not about the server
+
+Voice capture failed on the phone with a message about the server, and
+nothing arrived at Caddy or in the service log. The message was the
+problem: it was a lie, and not an incidental one.
+
+`lib/api.ts` caught every throw from `fetch` with a bare `catch {}` — the
+exception discarded, not logged — and reported `No connection.` for all
+of them. A malformed body, an unreadable file part, and a flat network
+produced identical text. So the reported symptom was never evidence of a
+network fault, and it sent the last hour of investigation at the VPS,
+which had already been verified end to end the same day.
+
+**Eliminated by inspection, so they can stop being suspects:**
+
+- *A client-side size or MIME guard rejecting the upload.* There is none.
+  `captureAudio` has no guards at all; every size and format check is
+  server-side.
+- *A malformed FormData body.* The `{uri, name, type}` shape matches
+  React Native 0.86's own `FormData.getParts()` exactly — a value with a
+  `uri` becomes a file part with `content-disposition` and
+  `content-type` headers, which is what is being built.
+- *A hand-set `Content-Type` breaking the boundary.* Correctly omitted
+  for multipart; RN sets it with the generated boundary.
+- *`setAudioModeAsync` disturbing the recorder before the URI is read.*
+  Android's implementation only assigns `useForegroundService` on each
+  recorder. It does not touch `filePath`, so the ordering in `finish()`
+  is safe. (Separately: Android's `AudioMode` has no `allowsRecording`
+  field at all — that one is iOS-only and is a no-op here.)
+- *The server rejecting it.* A real `.m4a` went through `POST
+  /capture/audio` earlier the same day and completed in 1.57s.
+
+**Not eliminated, and not confirmable from here:** the file at
+`recorder.uri` not being readable when `fetch` reaches for it. React
+Native surfaces that as `TypeError: Network request failed` — the same
+string a flat network gives — because the native networking module
+raises both through one channel. There is no way to tell them apart after
+the fact, which is why the fix does not try to.
+
+One concrete finding feeding that hypothesis: expo-audio's Android
+recorder exposes `uri` as `filePath?.let { ... } ?: ""` — an **empty
+string, never null** — and `filePath` is only assigned inside
+`setRecordingOptions`, which returns early without assigning it when
+`hasRecordingPermissions()` is false at prepare time. So there is a
+silent path to an empty URI with no exception raised anywhere.
+
+**What changed:**
+
+- `ApiError` now carries `kind` (`http` | `timeout` | `transport` |
+  `client`), the original `cause`, and a one-line `diagnostic`. `client`
+  means the request never left the device — the distinction the old code
+  could not express.
+- The real exception is logged with a `[shelf/api]` prefix, greppable in
+  `adb logcat`. It is no longer discarded.
+- The screen says which machine has the problem. A local failure now
+  reads "The app could not send that recording — it is still here",
+  followed by the actual exception, rather than anything about servers.
+- A **preflight**: the recording's file is checked for existence and
+  non-zero size *before* it is handed to `fetch`, so the ambiguous case
+  is caught while it is still legible. An empty URI is named as a
+  permission problem specifically.
+- `stop()` returns a discriminated `StopResult` — `recording` /
+  `too-short` / `unusable` — instead of `Recording | null`. A null could
+  not distinguish "you tapped instead of holding" from "there is no file
+  on disk", and the screen was showing the former for both.
+- The decision lives in a pure `classifyRecording()`, testable without a
+  renderer. `react-test-renderer` wants React `^19.2.8` against the SDK
+  57 pin of `19.2.3`, and bumping React to test a hook is not a trade
+  worth making.
+- Duration is checked before the file, deliberately: a sub-100ms press
+  can leave a zero-byte file legitimately, and "the recording is empty"
+  is worse advice than "hold the button" for a mis-tap.
+
+**The text path is unchanged** apart from the `request()` refactor, where
+`multipart` defaults falsy and `application/json` is still set — pinned
+by a test. If text capture also fails on this build, the problem is all
+outbound requests rather than the upload path, and that is worth knowing
+either way.
+
+**Latent, not hit today:** `mimeFor` can return `audio/3gpp`, which the
+server refuses because the bucket cannot store it. Unreachable while the
+recorder uses the HIGH_QUALITY preset (`.m4a`); switching to LOW_QUALITY
+would fail every capture with a 400.
+
+55 mobile tests (26 new), 164 backend tests, lint and typecheck clean.
+**No root cause yet** — this makes the next failure name itself instead
+of blaming the server.
