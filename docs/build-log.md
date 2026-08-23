@@ -161,7 +161,7 @@ off-site copy is still worth adding.
 
 | Area | Status |
 |---|---|
-| Schema (`shelf`, 7 tables + view) | ✅ live, migrations 001–003 applied |
+| Schema (`shelf`, 8 tables + view) | ✅ live, migrations 001–004 applied |
 | Audio bucket (`shelf-audio`, private) | ✅ created, unused |
 | API at `https://srv1531684.hstgr.cloud/api` | ✅ live on 443 |
 | systemd service, survives reboot | ✅ verified |
@@ -171,18 +171,24 @@ off-site copy is still worth adding.
 | Timezone handling (IST) | ✅ tested — "tomorrow 3pm" → 09:30Z |
 | `GET /items/today`, `POST /items/{id}/done` | ✅ live |
 | Item detail, edit, move, delete (UC37/38/21/39) | ✅ verified live |
+| Scheduler tick (`shelf-tick.timer`, 1 min) | ✅ live under systemd |
+| Auto-shelve on ignores/snoozes (UC18) | ✅ verified against the real DB and clock |
+| Auto-drop after 90 days (UC19) | ✅ verified by backdating real rows |
+| Snooze (UC17), reactivate (UC20) | ✅ verified live over HTTPS |
+| Push send path + Expo failure handling (UC23) | ✅ real round trip to `exp.host` |
+| A notification actually on the phone (UC23/UC15) | ❌ needs a build with `expo-notifications` installed |
 | Expo app: capture, today, sign-in | ⚠️ built, never run on a phone |
 | Voice capture, hold-to-record (UC1) | ⚠️ upload body fixed (D26); not yet re-run on a phone |
 | Audio stored + signed playback (UC7) | ✅ verified live, byte-identical |
 | Cloud transcription (UC8) | ✅ verified live — Groq turbo, 1.6s round trip |
 | Multi-item splitting (UC4) | ⚠️ built, never run against real Haiku |
-| Mobile test suite (jest-expo) | ✅ 73 tests |
-| Backend test suite | ✅ 210 tests |
+| Mobile test suite (jest-expo) | ✅ 97 tests |
+| Backend test suite | ✅ 243 tests, plus 21 opt-in `-m db` |
 | Native dep tree vs SDK 57 matrix | ✅ reconciled, `expo-doctor` 21/21 |
 | Google OAuth redirect handling | ✅ callback swallowed, not routed |
 | Google OAuth config | ❌ not started |
 | APK on the phone | ❌ not started |
-| Everything Phase 2+ | ❌ not started |
+| Sessions 3-5 | ❌ not started |
 
 ## 7. Pending — immediate
 
@@ -193,9 +199,14 @@ off-site copy is still worth adding.
    Done, several times over.
 4. **Rebuild with the FormData fix (D26) and use it.** Voice capture has
    never completed on the phone; every live verification went through `curl`.
-5. **Use it for two weeks.** This is a gate, not a formality — session 1's
-   exit criterion is real usage, and session 2's decay constants are
-   guesswork until there is behaviour to tune them against.
+5. **Rebuild again, now for notifications.** The build on the phone predates
+   `expo-notifications`, so there is nothing on it to register a push token
+   with. Session 2's server half is done and proven; its last hop is not, and
+   cannot be until a build with the module in it is installed.
+6. **Then the two-minute test.** Capture something due shortly, wait for the
+   notification, press Done, and check `notifications.response` says `done`.
+7. **Use it for two weeks.** Still a gate, still not a formality — and now
+   there are three constants riding on it rather than two (O1, O2, O5).
 
 ## 8. Pending — later sessions
 
@@ -218,13 +229,17 @@ full graph UI.
 |---|---|---|
 | O1 | Ignores before auto-shelve | 3 |
 | O2 | Days shelved before auto-drop | 90 |
+| O5 | Minutes between repeat pushes | 60 — and it, not O1, is what sets the pace of decay (D33) |
 | O3 | Echo the parse back on capture? | Middle option shipped — state announced, parse not echoed |
 | ~~O4~~ | ~~Hinglish transcription quality~~ | **Closed 23 Aug 2026** — English only, so the premise is gone (D23) |
 
-O1 and O2 are answerable from data rather than opinion: the
+O1, O2 and O5 are answerable from data rather than opinion: the
 `transitions` table logs every state change with a reason, so after a
 month of use you can query how often decay-shelved items get
-resurrected and tune both from evidence.
+resurrected and tune all three from evidence. The query that matters is
+`reason = 'reactivation'` — every route from `shelved` back to `active`
+is logged that way on purpose (D35), so the count is exactly "how often
+did the system put something away that I wanted".
 
 ## 10. Known debt
 
@@ -238,6 +253,15 @@ resurrected and tune both from evidence.
   outstanding.
 - An APK built this way doesn't auto-update — every change means a
   rebuild and reinstall.
+- Push receipts are not polled. Expo's *ticket* errors are handled (a dead
+  token is disabled, a refused message never marks `sent_at`), but the
+  asynchronous receipt — which is where a delivery that FCM later rejected
+  shows up — is not fetched. For one device this is a log line nobody would
+  read; it becomes worth building when a push is reported missing and the
+  ticket says it was accepted.
+- Nothing unregisters a push token on sign-out. Single user, and the token is
+  reassigned on the next sign-in by the `on conflict` upsert, so the failure
+  mode it would prevent does not exist yet.
 
 ## 11. Lessons
 
@@ -1047,3 +1071,84 @@ stringifying the file part so the test passed while the device failed.
 
 No code changed. `PLAN.md`, `CLAUDE.md`, `docs/use-cases.md`,
 `docs/architecture.md` and this file did.
+
+### 23 August 2026 — the decay engine, and a push that cannot lie
+
+Session 2. UC23, UC15, UC17, UC18, UC19, UC20 — the last of the P0 work and
+the part the whole design is actually about.
+
+**What was built.** Migration 004 adds `push_tokens` and three columns to
+`notifications` (`attempts`, `last_error`, `ticket_id`). `backend/push.py` is
+a small Expo client; `backend/scheduler.py` is the tick, run once a minute by
+`shelf-tick.timer` under systemd. Three new routes — `POST /devices`,
+`POST /items/{id}/snooze`, `POST /items/{id}/reactivate`. On the device,
+`lib/notifications.ts` registers the token and the Done/Snooze buttons and
+answers them, and the item detail screen grew a Reactivate button and a
+Snooze one.
+
+**The constant nobody had named.** `docs/data-model.md` said an `ignored` row
+is written "when the next push comes due with no response to the previous
+one", which quietly assumes a repeat interval that no config value had ever
+declared. It is now `PUSH_REPEAT_MINUTES`, default 60, and it turns out to be
+the number that actually decides how fast decay runs: at 60 with
+`SHELVE_AFTER_IGNORES` at 3, an item nobody touches is on the shelf about two
+hours after it fell due. `SHELVE_AFTER_IGNORES` was the constant everyone was
+watching, and it is the less interesting half of the pair (D33, O5).
+
+**The property worth naming.** *An item is never decayed by a push that did
+not go out.* `sent_at` is written only when Expo accepted the message, and the
+ignore sweep reads silence only from rows that carry one. Everything that can
+fail on the way — the service down, no device registered, a dead token —
+records itself and leaves `sent_at` null. After five attempts a queued push
+**stalls**, and that item stops being reminded about.
+
+That stall is the deliberate part. The alternative is to mark it sent and move
+on, which means the system shelves things because of its own outage and never
+says so — the exact inversion of "silence is signal", because it is the system
+manufacturing the silence it then reads. A stall costs reminders; the other
+costs state, and state is the thing this app is for (D32).
+
+**Reactivation had two bugs in it before it was written.** An item brought
+back off the shelf still carrying the three ignores that put it there
+re-shelves on its first push, so the escape hatch would not be one — the
+counters reset on entering `active`, by trigger, because four different code
+paths can make that move and a rule enforced in four places will be missed in
+a fifth. And `active` with no `due_at` is invisible: `Today` is bounded on
+`due_at` (D17) and the scheduler only pushes what is due, so reactivating
+without settling a time would have quietly put items into a state nothing in
+the app can show (D35).
+
+**Where the buttons ended up.** Done and Snooze foreground the app.
+`expo-notifications` is blunt about the alternative: with
+`opensAppToForeground: false`, a response given while the app is *killed*
+reaches no listener at all. A Done button that silently does nothing after a
+reboot teaches you not to trust the button; one that flashes the app open only
+annoys you. Answering from inside the shade needs a native background handler,
+which is UC24's class of work and waits for the same evidence (D34).
+
+**How it was verified.** `pytest -m db` — 21 tests against the live Postgres
+and the real clock, not a stubbed one. An item created not-yet-due, a real
+22-second wait, then the push. Three ignore cycles walked to `shelved` with
+reason `decay`, asserting not just the transition but the *silence*: exactly
+as many notification rows as there were ignores, none of them about the
+shelving. A row inserted 91 days old, dropped with reason `expiry`. A snooze
+counted against the same threshold as an ignore. A push that failed to send,
+ticked five more times, decaying nothing.
+
+Then a real HTTPS round trip to `exp.host` with a well-formed but fake token:
+Expo answered `DeviceNotRegistered`, the token was disabled, the notification
+kept `sent_at` null and the item stayed `active` with `push_count` 0. And a
+live walk of the three new routes through Caddy with a real JWT.
+
+**What is not verified, and this is the honest part.** No notification has
+appeared on the phone. The build on the device predates `expo-notifications`,
+so there is nothing on it that can register a push token — the last hop of
+UC23 and all of UC15 are unproven on real hardware. Session 2's exit criterion
+is therefore *not* met, and the remaining step is an EAS build, an install, and
+a real item due two minutes out.
+
+**And the gate that was skipped.** `PLAN.md` says the real gate before this
+session was two weeks of daily use, because every decay constant is guesswork
+until there is behaviour to tune it against. That has not happened. The work
+was done anyway, so the constants remain opinion — and there are three of them
+now, not two.

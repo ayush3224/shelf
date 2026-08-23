@@ -14,17 +14,18 @@
 │          home-screen widget   │
 └───────────┬──────────────────┘
             │ HTTPS
-┌───────────▼──────────────────┐      ┌──────────────────┐
-│  FastAPI on Railway           │─────▶│  Anthropic API   │
+┌───────────▼───────────────────┐      ┌──────────────────┐
+│  FastAPI on a VPS (systemd)   │─────▶│  Anthropic API   │
 │  · /capture  · /items         │      │  claude-haiku-4-5│
-│  · /transitions  · /query     │      └──────────────────┘
-│  · cron: 1-min tick           │
-└───────────┬──────────────────┘      ┌──────────────────┐
-            │                          │ Google Calendar  │
-┌───────────▼──────────────────┐      │  (session 5)     │
-│  Supabase                     │      └──────────────────┘
-│  Postgres · Auth · Storage    │
-└──────────────────────────────┘
+│  · /devices  · /snooze        │      └──────────────────┘
+│  · shelf-tick.timer: 1-min    │      ┌──────────────────┐
+│                               │─────▶│  Expo push → FCM │
+└───────────┬───────────────────┘      └──────────────────┘
+            │                          ┌──────────────────┐
+┌───────────▼───────────────────┐      │ Google Calendar  │
+│  Supabase                     │      │  (session 5)     │
+│  Postgres · Auth · Storage    │      └──────────────────┘
+└───────────────────────────────┘
 ```
 
 ## Capture flow
@@ -63,15 +64,33 @@ user's voice.
 
 ## Scheduler (1-minute tick)
 
-Pure SQL, no model calls:
+`backend/scheduler.py`, run by `shelf-tick.timer` — a systemd `oneshot`, not
+Railway cron, because the API has never actually run on Railway (D36). Pure
+SQL and one HTTPS call to the push service; no model call ever.
 
-- Items where `due_at <= now()` and not yet notified → enqueue push.
-- Prior notification unanswered → write `response = 'ignored'`,
-  increment `push_count`.
-- `push_count >= SHELVE_AFTER_IGNORES` → transition to `shelved`,
-  reason `decay`. **Silently** — UC22 was dropped, so nothing announces it.
-- `state = 'shelved'` and `state_changed_at < now() - DROP_AFTER_DAYS`
-  → transition to `dropped`, reason `expiry`. Also silent.
+The order is the design:
+
+1. **Read the silence.** A push that was delivered and is still unanswered
+   `PUSH_REPEAT_MINUTES` later → `response = 'ignored'`, `push_count + 1`.
+2. **Decay.** `push_count + snooze_count >= SHELVE_AFTER_IGNORES` →
+   `shelved`, reason `decay`. **Silently** — UC22 was dropped.
+3. **Expire.** `shelved` and untouched past `DROP_AFTER_DAYS` →
+   `dropped`, reason `expiry`. Also silent. "Untouched" is the later of
+   `state_changed_at` and `updated_at` (D37).
+4. **Cancel.** Notifications belonging to items that are no longer `active` —
+   queued ones deleted, delivered ones closed with no response.
+5. **Enqueue.** Everything due with nothing outstanding gets a row.
+6. **Send.** One message per registered device, in one request to Expo.
+
+Steps 1-3 run before step 5 so an item shelving on this tick does not also get
+a fresh push on it. Ignoring and snoozing feed the same threshold — both are
+"not now" (UC18) — the difference being that a snooze *answers* the push and an
+ignore is read out of the silence.
+
+**Nothing decays from a push that did not go out** (D32). `sent_at` is written
+only when Expo accepted the message, step 1 only reads rows that carry one, and
+a send that keeps failing stalls after `PUSH_MAX_ATTEMPTS` rather than being
+marked sent. A broken delivery path costs reminders, never state.
 
 UC29 (quiet hours) was dropped too, so nothing suppresses an overnight push.
 `QUIET_HOURS` remains in the config module but is unused; leaving it there is
@@ -80,11 +99,36 @@ cheaper than removing it and re-deriving it if the decision reverses.
 With both dropped, the `transitions` table and the weekly digest (UC31) are
 the only places decay is observable at all.
 
+## Push delivery (UC23, UC15, UC17)
+
+```
+scheduler ──▶ exp.host/--/api/v2/push/send ──▶ FCM ──▶ device
+                        ▲
+                 FCM V1 service account key
+                 lives in the EAS dashboard
+```
+
+The app is Expo, so the address of a device is an `ExponentPushToken` and
+Expo's service is what stands in front of FCM. The server holds no Google
+credential at all; talking to FCM directly would mean managing that key twice.
+
+- The app posts its token to `POST /devices` **on every launch**, because Expo
+  reissues it on reinstall or a data clear, and a stale token is a reminder
+  that goes nowhere with nothing to show for it.
+- The Done and Snooze buttons come from a notification *category* the app
+  registers and the server names on every message. Both names live in config on
+  the server and in `lib/notifications.ts` on the device; if they drift, the
+  notification still arrives and simply has no buttons.
+- Both actions foreground the app (D34) — a response given while the app is
+  killed never reaches a listener otherwise.
+- `DeviceNotRegistered` from Expo disables the token; the item is not punished
+  for it.
+
 ## Delivery tiers
 
 | Tier | Trigger | Mechanism |
 |------|---------|-----------|
-| Push | normal item due | FCM notification with done/snooze actions |
+| Push | normal item due | Expo → FCM notification with done/snooze actions — **built** |
 | Alarm | `critical`, or already ignored twice | native full-screen intent, bypasses DND |
 | Call | opt-in, must-not-miss (P2) | CallMeBot HTTP GET |
 

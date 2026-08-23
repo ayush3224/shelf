@@ -310,6 +310,99 @@ swipe to discover.
 *Revisit if:* finishing an item starts feeling fiddly in daily use — the answer
 would be a swipe for done, not putting navigation back on the whole row.
 
+**D32 — A push that did not go out can never decay an item.**
+`sent_at` is written only when the push service has accepted the message, and
+the ignore sweep only reads silence from rows that carry one. Everything that
+can go wrong on the way — Expo down, no device registered yet, a token the OS
+has retired — records itself in `attempts` and `last_error` and leaves
+`sent_at` null.
+The consequence is chosen rather than tolerated: after `PUSH_MAX_ATTEMPTS` a
+queued push **stalls**, and the item stops being reminded about. That is the
+failure mode to want. The alternative — mark it sent and move on — means the
+system shelves things for its own outage and tells the user nothing, which is
+the exact opposite of "silence is signal": it is the system inventing silence
+on the user's behalf. A stall is loud in the log and costs nothing but a
+missed reminder.
+*Revisit if:* stalls happen for any reason other than a genuinely dead device.
+
+**D33 — `PUSH_REPEAT_MINUTES` is the real speed of decay, and it is 60.**
+`docs/data-model.md` said an `ignored` row is written "when the next push comes
+due with no response to the previous one" — which quietly assumes a repeat
+interval that no constant had ever named. It is now `PUSH_REPEAT_MINUTES`, one
+hour, and it does double duty: it is how long an unanswered push waits before
+the next one, and therefore how long silence takes to become an ignore.
+With `SHELVE_AFTER_IGNORES` at 3 this means an item nobody touches is pushed at
+the due moment, an hour later, and an hour after that, and is on the shelf
+about two hours after it fell due. That is fast. It is deliberately fast: the
+whole bet is that repeated non-response is a decision, and a threshold slow
+enough to be polite is one that never fires. It is also a guess, which is why
+it joins O1 and O2 as something to tune from `transitions` rather than from
+opinion (O5).
+A snooze counts the same as an ignore, and answers the push rather than being
+left to time out — so `push_count` stays "declined by silence" and
+`snooze_count` stays "declined out loud", and the threshold reads the sum.
+*Revisit if:* things you care about are shelved before the day they were due
+is over. That means an hour is too short, not that the model is wrong (D2).
+
+**D34 — Both notification actions open the app.**
+`expo-notifications` documents the cost of the quiet version plainly: with
+`opensAppToForeground: false`, a response given while the app is *killed*
+reaches no listener at all. A Done button that silently does nothing after a
+reboot is worse than one that flashes the app open for half a second, because
+the first teaches you not to trust the button and the second only annoys you.
+So Done and Snooze both foreground the app, act, and land on `Today` — where
+the row being gone is the confirmation. A failure, or an item that has moved on
+since the push, gets a dialog; success gets none.
+Answering without leaving the shade needs a native background handler. That is
+the same class of work as UC24's alarm and waits for the same evidence: daily
+use showing it is worth it.
+*Revisit if:* the flash of the app opening is the thing that stops you using
+the buttons.
+
+**D35 — Reactivating resets the decay count and settles a due time.**
+Two things that look like details and are not.
+The **count reset** is what makes UC20 an escape hatch at all: an item brought
+back carrying the three ignores that shelved it re-shelves on its first push,
+and the user has no way to keep it. It is done by trigger (migration 004)
+rather than at the call site, because the scheduler, UC20, UC21 and an edit
+that re-derives state (D29) all move items into `active`, and a rule enforced
+in four places is a rule that will be missed in a fifth.
+The **due time** is what makes it visible: `Today` is bounded on `due_at` (D17)
+and the scheduler only pushes what is due, so `active` with no time is a state
+nothing in this app would ever surface again. Reactivating without one sets it
+to now; a time still in the future is left alone, and a time in the past is
+replaced, because the point of reactivating is that you want it now and not
+that you want to be told it was overdue in March.
+Crossing `shelved → active` is logged as `reactivation` whichever control asked
+for it — the chips (UC21) route through the same call. That edge *is* the
+evidence O1 is tuned from, and leaving it as `manual` would hide it among the
+ordinary corrections. Un-finishing a `done` item is not that, and stays
+`manual`.
+
+**D36 — The one-minute tick is a systemd timer, not Railway cron.**
+`CLAUDE.md` says "Railway cron, 1-minute tick". The API has never actually run
+on Railway — it is FastAPI under systemd behind Caddy on a VPS — so the tick is
+`shelf-tick.timer` calling `python -m backend.scheduler`, once a minute, as a
+`oneshot`. Same idea, in the form this host has.
+A separate process rather than a loop inside the API: a tick that shares the
+web process shares its restarts and its memory, and cannot be run by hand
+against the real database while the API is up, which is exactly what it needed
+to be during this session. systemd will not start a second copy of a unit that
+is still running, so overlapping ticks are not a case that has to be handled.
+*Revisit if:* the deployment ever moves to Railway, at which point this becomes
+a cron entry and nothing else changes.
+
+**D37 — "Untouched" on the shelf includes being edited.**
+UC19 drops a `shelved` item after `DROP_AFTER_DAYS`. `docs/data-model.md` said
+the clock was `state_changed_at`; the rule is now the later of
+`state_changed_at` and `updated_at`.
+The difference matters for exactly one case, and it is the case that would
+hurt: an item you shelved in March and corrected the wording of last week is
+one you were demonstrably still thinking about, and throwing it away on the
+90th day after the shelving would be the system ignoring the clearest possible
+evidence to the contrary. Nothing writes to a shelved row on its own, so this
+only ever moves in response to a person.
+
 ---
 
 ## Open
@@ -320,6 +413,13 @@ reactivated — a high rate means the number is too low.
 
 **O2 — `DROP_AFTER_DAYS`.** Default 90. Same method: how often do you
 resurrect something from the shelf after 60+ days?
+
+**O5 — `PUSH_REPEAT_MINUTES`.** Default 60 (D33). The constant nobody
+had named, and the one that actually sets how fast decay runs. Same method
+as O1 and O2: after a month, ask `transitions` how many decay-shelved items
+were reactivated by hand, and how soon after the due time they shelved. A
+high reactivation rate here is more likely to be this number than
+`SHELVE_AFTER_IGNORES`.
 
 **O3 — Echo-back on capture.** Should the app confirm what it
 understood ("Got it — call insurance, Tuesday 3pm") or stay silent and

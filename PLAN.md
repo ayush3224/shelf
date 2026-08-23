@@ -45,7 +45,7 @@ against.
 
 ---
 
-## Session 2 — Decay engine and push (P0)
+## Session 2 — Decay engine and push ✅ *(built 23 August 2026)*
 
 The differentiating part, and the last of the P0 work.
 
@@ -65,6 +65,24 @@ overnight push.
 
 **Exit:** you can ignore the app for a week and the state is still honest —
 nothing lingers `active` that you have repeatedly not acted on.
+
+*Built and verified server-side against the live database and the real clock:
+`pytest -m db` walks a real item from due, through three ignored pushes, to
+`shelved` with reason `decay`, and a real row backdated ninety days to
+`dropped` with reason `expiry` — nothing announced either. The failure paths
+are proven too, including a real round trip to Expo: a push that does not
+leave never marks `sent_at` and therefore cannot decay anything (D32).*
+
+**Still outstanding:** the last hop. A real notification has not yet appeared
+on the phone, because the build on the device predates `expo-notifications` —
+there is nothing on it to register a token. That needs an EAS build installed,
+and then the two-minute test: capture something due shortly, watch it arrive,
+press Done. Until that has happened the exit criterion is not met.
+
+The **real gate** stated below — two weeks of daily use — was not met before
+this session, and the constants are still guesses because of it. `PUSH_REPEAT_MINUTES`
+is a new one (D33, O5) and it is the one that decides how fast decay actually
+runs.
 
 ---
 
@@ -149,11 +167,14 @@ speculation does not.
 
 ## Open questions
 
-Locked defaults are in `docs/decisions.md`. These two want real answers once
+Locked defaults are in `docs/decisions.md`. These three want real answers once
 there is data:
 
 1. `SHELVE_AFTER_IGNORES` — default 3
 2. `DROP_AFTER_DAYS` — default 90
+3. `PUSH_REPEAT_MINUTES` — default 60, and the one that actually sets the
+   pace: at 60 with a threshold of 3, an item nobody touches is on the shelf
+   about two hours after it fell due (D33, O5)
 
 The `transitions` table logs every state change with a reason, so after a
 month you can query how often a decay-shelved item gets resurrected by hand

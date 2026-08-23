@@ -21,6 +21,12 @@ every row so that assumption is cheap to unwind later.
 `done` and `dropped` are terminal but reversible by hand (UC21).
 Everything else moves on its own.
 
+`push_count` and `snooze_count` are the decay counter, and they count
+*this* stretch of being active: entering `active` from any other state
+resets both, by trigger (migration 004, D35). Without that, an item
+taken back off the shelf would arrive carrying the ignores that put it
+there and shelve again on its first push.
+
 ## Tables
 
 ### `items`
@@ -44,7 +50,7 @@ The core row. One per captured thing.
 | `snooze_count` | int | |
 | `parse_status` | enum | `ok` \| `failed` \| `needs_review` (UC42) |
 | `source` | enum | `voice` \| `text` \| `widget` |
-| `state_changed_at` | timestamptz | drives the drop timer |
+| `state_changed_at` | timestamptz | with `updated_at`, drives the drop timer (D37) |
 | `created_at` / `updated_at` | timestamptz | |
 
 Indexes: `(user_id, state, due_at)`, `(user_id, state_changed_at)`,
@@ -88,9 +94,46 @@ Unique on `(item_id, entity_id, relation)`.
 `id`, `item_id`, `scheduled_for`, `tier` (`push`\|`alarm`\|`call`),
 `sent_at`, `responded_at`, `response` (`done`\|`snooze`\|`ignored`).
 
+Plus, from migration 004: `attempts`, `last_error`, `ticket_id`.
+
 An `ignored` row is written by the scheduler when the next push comes
-due with no response to the previous one. That write is what increments
+due with no response to the previous one — "next push due" being
+`sent_at + PUSH_REPEAT_MINUTES` (D33). That write is what increments
 `push_count` and eventually triggers decay.
+
+`sent_at` is set **only** when the push service accepted the message.
+Everything that stops a push leaving records itself in `attempts` and
+`last_error` instead, and the ignore sweep never looks at a row without
+`sent_at` — so an item cannot be decayed by a reminder the user never
+received (D32). After `PUSH_MAX_ATTEMPTS` the row stalls rather than
+being marked sent.
+
+`responded_at` set with `response` **null** is a third thing, distinct
+from both an answer and a silence: the item left `active` some other way
+(finished elsewhere, moved by hand) and the push was cancelled rather
+than ignored. Counting those as ignores would decay items the user had
+just touched.
+
+### `push_tokens` *(UC23, migration 004)*
+Where a reminder is actually sent.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | uuid pk | |
+| `user_id` | uuid | reassigned on conflict, see below |
+| `token` | text unique | `ExponentPushToken[...]` |
+| `platform` | text | `android` \| `ios` \| `web` |
+| `device_name` | text null | for telling two phones apart |
+| `created_at` / `updated_at` | timestamptz | |
+| `last_success_at` | timestamptz null | last push the service accepted |
+| `disabled_at` / `disabled_reason` | | set on `DeviceNotRegistered` |
+
+Keyed on the **token**, not the user: an Expo push token identifies an
+install, and the same install can be signed in as someone else tomorrow.
+Registering an existing token therefore reassigns the row instead of
+adding a second one, which would push the same phone twice. It also
+clears `disabled_at` — a token we had written off has just proved
+otherwise by turning up again.
 
 ### `calendar_links` *(UC43)*
 `item_id`, `google_event_id`, `calendar_id`, `last_synced_at`,
@@ -103,9 +146,14 @@ One-way: app → Google. Never merge back.
 Keep these in one config module, not scattered as literals.
 
 ```python
-SHELVE_AFTER_IGNORES = 3     # UC18 — tune from `transitions`
-DROP_AFTER_DAYS      = 90    # UC19 — tune from `transitions`
-QUIET_HOURS          = (22, 7)
+SHELVE_AFTER_IGNORES = 3     # UC18 — tune from `transitions` (O1)
+DROP_AFTER_DAYS      = 90    # UC19 — tune from `transitions` (O2)
+PUSH_REPEAT_MINUTES  = 60    # UC23 — and therefore the real speed of decay (D33, O5)
+SNOOZE_MINUTES       = 30    # UC17 — the default the notification button uses
+MAX_SNOOZE_MINUTES   = 10080 # a week; beyond this is refused, not clamped
+PUSH_BATCH_LIMIT     = 20    # sends per tick
+PUSH_MAX_ATTEMPTS    = 5     # then the row stalls; it is never marked sent (D32)
+QUIET_HOURS          = (22, 7)   # UC29 dropped — kept, unused
 MAX_PARSE_TOKENS     = 200
 MAX_SPLIT_TOKENS     = 600   # UC4 — the array re-prompt only (D19)
 MAX_SPLIT_ITEMS      = 10

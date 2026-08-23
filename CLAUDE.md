@@ -50,11 +50,12 @@ accurate, it is the wrong feature. Push back on it.
 |------------|--------|
 | Mobile     | Expo / React Native, TypeScript |
 | Native     | None yet. The full-screen alarm (UC24) and widget (UC2) are deferred pending real usage |
-| Backend    | FastAPI (Python) on Railway |
+| Backend    | FastAPI (Python) on a VPS, behind Caddy |
 | DB / Auth / Storage | Supabase (Postgres, Auth, Storage for audio) |
 | LLM        | Claude `claude-haiku-4-5` via the Anthropic API |
+| Push       | `expo-notifications` → Expo push service → FCM (UC23) |
 | STT        | Whisper (`whisper-large-v3-turbo`) on Groq, free tier. On-device `SpeechRecognizer` was dropped — see D20 |
-| Scheduler  | Railway cron, 1-minute tick |
+| Scheduler  | `shelf-tick.timer` — systemd, 1-minute tick on the VPS (D36) |
 | Calendar   | Google Calendar API (OAuth) — session 5 |
 | Voice call | CallMeBot — unscheduled (UC26, P2) |
 
