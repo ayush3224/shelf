@@ -1,10 +1,19 @@
 """Database connection and operations."""
 
+from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
+
+from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from backend.config import settings
+
+# Coming back to `active` from one of these is a reactivation (UC20) rather
+# than a plain manual move (UC21) — the system put the item away and the user
+# took it back out, which is exactly the event O1 and O2 get tuned against.
+# Undoing a `done` is not that, so `done` is not in here.
+_REACTIVATED_FROM = ("shelved", "dropped")
 
 
 class Database:
@@ -33,6 +42,22 @@ class Database:
         if self.pool is None:
             await self.connect()
         return self.pool  # type: ignore
+
+    @asynccontextmanager
+    async def connection(self) -> AsyncIterator[AsyncConnection]:
+        """A pooled connection, for SQL that lives outside this class.
+
+        The scheduler's tick (UC18, UC19, UC23) is one ordered script rather
+        than a set of API operations, so it keeps its own SQL in
+        `backend/scheduler.py` — but it has no business reaching into a
+        private attribute to get a connection.
+
+        Yields:
+            An open connection from the pool.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            yield conn
 
     async def create_item(
         self,
@@ -446,6 +471,12 @@ class Database:
         `manual` so that decay-driven moves stay distinguishable from
         user-driven ones — the whole point of O1 and O2 is telling them apart.
 
+        One exception: `shelved` or `dropped` back to `active` is logged as
+        `reactivation`, whichever route it came in by. That move *is* UC20,
+        and O1 is answered by counting it — a decayed item the user fetches
+        back by hand is the evidence that the threshold is too low. Leaving it
+        as `manual` would hide it among the ordinary corrections.
+
         Idempotent: setting the state an item is already in writes no
         transition.
 
@@ -476,12 +507,26 @@ class Database:
                 logged AS (
                     INSERT INTO {settings.db_schema}.transitions
                       (item_id, from_state, to_state, reason)
-                    SELECT prev.id, prev.state, %s, 'manual'
+                    SELECT prev.id, prev.state, %s,
+                           CASE
+                             WHEN %s = 'active'
+                              AND prev.state::text = ANY(%s)
+                               THEN 'reactivation'
+                             ELSE 'manual'
+                           END::{settings.db_schema}.transition_reason
                       FROM prev JOIN upd ON upd.id = prev.id
                 )
                 SELECT prev.state::text FROM prev
                 """,
-                (item_id, user_id, state, state, state),
+                (
+                    item_id,
+                    user_id,
+                    state,
+                    state,
+                    state,
+                    state,
+                    list(_REACTIVATED_FROM),
+                ),
             )
             row = await result.fetchone()
             return row[0] if row else None
@@ -528,6 +573,12 @@ class Database:
         written in the same statement as the update — an unlogged state change
         is a hole in the data the decay constants get tuned from.
 
+        Any push still waiting on an answer is closed here with
+        `response = 'done'`, whether the answer came from the notification
+        (UC15) or from the app (UC16). That write is what stops the scheduler
+        reading the same silence as an ignore a minute later, and it is also
+        the only record of whether pushes are being acted on at all.
+
         Idempotent: marking an already-done item again is a no-op and writes
         no second transition.
 
@@ -560,6 +611,12 @@ class Database:
                       (item_id, from_state, to_state, reason)
                     SELECT prev.id, prev.state, 'done', 'completion'
                       FROM prev JOIN upd ON upd.id = prev.id
+                ),
+                answered AS (
+                    UPDATE {settings.db_schema}.notifications n
+                       SET responded_at = now(), response = 'done'
+                      FROM upd
+                     WHERE n.item_id = upd.id AND n.responded_at IS NULL
                 )
                 SELECT prev.state::text FROM prev
                 """,
@@ -567,6 +624,277 @@ class Database:
             )
             row = await result.fetchone()
             return row[0] if row else None
+
+    # ------------------------------------------------------------- devices
+
+    async def register_push_token(
+        self,
+        user_id: str,
+        token: str,
+        platform: str,
+        device_name: Optional[str] = None,
+    ) -> bool:
+        """Store the device's push token, or move it to this user (UC23).
+
+        Keyed on the token, not on the user. An Expo push token identifies an
+        install, and the same install can be signed in as someone else
+        tomorrow — so a re-registration reassigns the row rather than adding a
+        second one, which would push the same phone twice.
+
+        Registering also clears any `disabled_at`: a token we had written off
+        as dead has just proved otherwise by turning up again.
+
+        Args:
+            user_id: Owner of the device, from the token's `sub`.
+            token: `ExponentPushToken[...]`, already validated by the caller.
+            platform: 'android', 'ios' or 'web'.
+            device_name: Free text for telling two devices apart in the table.
+
+        Returns:
+            True if the row was written.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                INSERT INTO {settings.db_schema}.push_tokens
+                  (user_id, token, platform, device_name)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (token) DO UPDATE
+                   SET user_id = EXCLUDED.user_id,
+                       platform = EXCLUDED.platform,
+                       device_name = coalesce(
+                           EXCLUDED.device_name,
+                           {settings.db_schema}.push_tokens.device_name
+                       ),
+                       disabled_at = NULL,
+                       disabled_reason = NULL
+                RETURNING id::text
+                """,
+                (user_id, token, platform, device_name),
+            )
+            return await result.fetchone() is not None
+
+    async def disable_push_token(self, token: str, reason: str) -> bool:
+        """Stop using a token the push service has rejected.
+
+        Called when Expo answers `DeviceNotRegistered` — the app was
+        uninstalled or replaced. The row is kept rather than deleted so that a
+        device going quiet is a recorded fact instead of an absence.
+
+        Args:
+            token: The dead token.
+            reason: What the push service said.
+
+        Returns:
+            True if a row was disabled.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                UPDATE {settings.db_schema}.push_tokens
+                   SET disabled_at = now(), disabled_reason = %s
+                 WHERE token = %s AND disabled_at IS NULL
+                RETURNING id::text
+                """,
+                (reason[:500], token),
+            )
+            return await result.fetchone() is not None
+
+    async def note_push_success(self, tokens: list[str]) -> None:
+        """Record that these tokens accepted a push.
+
+        Not load-bearing, and deliberately so: it is what tells you, months
+        later, whether a device stopped receiving without anyone noticing.
+
+        Args:
+            tokens: Tokens Expo accepted a message for.
+        """
+        if not tokens:
+            return
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            await conn.execute(
+                f"""
+                UPDATE {settings.db_schema}.push_tokens
+                   SET last_success_at = now()
+                 WHERE token = ANY(%s)
+                """,
+                (tokens,),
+            )
+
+    async def push_token_count(self, user_id: str) -> int:
+        """How many live devices this user has registered.
+
+        Args:
+            user_id: Owner.
+
+        Returns:
+            Count of tokens not marked dead.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                SELECT count(*)
+                  FROM {settings.db_schema}.push_tokens
+                 WHERE user_id = %s AND disabled_at IS NULL
+                """,
+                (user_id,),
+            )
+            row = await result.fetchone()
+            return int(row[0]) if row else 0
+
+    # ------------------------------------------------------- not now (UC17)
+
+    async def snooze_item(
+        self, item_id: str, user_id: str, minutes: int
+    ) -> Optional[dict[str, Any]]:
+        """Push an item's due time out and count it as a decline (UC17).
+
+        A snooze answers the outstanding push, so the scheduler will not read
+        the same silence as an ignore — but it still counts toward the decay
+        threshold. Ignoring and snoozing are both "not now" (UC18), and a
+        system that let you snooze forever would be a system you have to
+        administer, which is the thing this design refuses to be.
+
+        Only an `active` item can be snoozed. A notification acted on after
+        the item has already decayed to the shelf is not an error — the push
+        was real when it was sent — so this reports `changed = False` rather
+        than failing, and the caller says where the item actually went.
+
+        The new due time is measured from now, not from the old due time: a
+        snooze answered ten minutes late means ten minutes late.
+
+        Args:
+            item_id: Item to put off.
+            user_id: Owner; the update is scoped to them.
+            minutes: How far out to push the due time.
+
+        Returns:
+            The item's state, due time and snooze count after the attempt,
+            with `changed` saying whether anything moved. None if this user
+            has no such item.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                WITH prev AS (
+                    SELECT id, state, due_at, snooze_count
+                      FROM {settings.db_schema}.items
+                     WHERE id = %(item_id)s AND user_id = %(user_id)s
+                ),
+                upd AS (
+                    UPDATE {settings.db_schema}.items i
+                       SET due_at = now() + make_interval(mins => %(minutes)s),
+                           snooze_count = i.snooze_count + 1
+                      FROM prev
+                     WHERE i.id = prev.id AND prev.state = 'active'
+                    RETURNING i.id, i.due_at, i.snooze_count
+                ),
+                answered AS (
+                    UPDATE {settings.db_schema}.notifications n
+                       SET responded_at = now(), response = 'snooze'
+                      FROM upd
+                     WHERE n.item_id = upd.id AND n.responded_at IS NULL
+                    RETURNING n.id
+                )
+                SELECT prev.state::text AS state,
+                       coalesce((SELECT due_at FROM upd), prev.due_at) AS due_at,
+                       coalesce(
+                           (SELECT snooze_count FROM upd), prev.snooze_count
+                       ) AS snooze_count,
+                       (SELECT count(*) FROM upd) > 0 AS changed
+                  FROM prev
+                """,
+                {"item_id": item_id, "user_id": user_id, "minutes": minutes},
+            )
+            columns = [c.name for c in result.description or []]
+            row = await result.fetchone()
+            return dict(zip(columns, row)) if row else None
+
+    # ---------------------------------------------------- reactivate (UC20)
+
+    async def reactivate_item(
+        self, item_id: str, user_id: str, due_at: Optional[datetime] = None
+    ) -> Optional[dict[str, Any]]:
+        """Take an item back off the shelf (UC20).
+
+        The deliberate counterweight to silent decay: the system puts things
+        away on its own, so there has to be one obvious action that undoes it.
+
+        It gives the item a due time, because `active` without one is a state
+        this app cannot show you — `Today` is bounded on `due_at` (D17) and
+        the scheduler only pushes what is due, so an active item with no time
+        is one nothing would ever surface again. A time in the future is
+        respected; a time in the past is replaced with now, because the point
+        of reactivating is that you want it *now*, not that you want to be
+        told it was overdue in March.
+
+        `push_count` and `snooze_count` reset themselves on the way in, by
+        trigger (migration 004) — otherwise the item would arrive carrying the
+        ignores that shelved it and re-shelve on its first push.
+
+        Args:
+            item_id: Item to bring back.
+            user_id: Owner; the update is scoped to them.
+            due_at: An explicit due time, or None to let the rule above decide.
+
+        Returns:
+            Where the item came from, where it is now and when it is due, with
+            `changed` False if it was already active. None if no such item.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                WITH prev AS (
+                    SELECT id, state, due_at
+                      FROM {settings.db_schema}.items
+                     WHERE id = %(item_id)s AND user_id = %(user_id)s
+                ),
+                upd AS (
+                    UPDATE {settings.db_schema}.items i
+                       SET state = 'active',
+                           due_at = coalesce(
+                               %(due_at)s::timestamptz,
+                               CASE
+                                 WHEN i.due_at > now() THEN i.due_at
+                                 ELSE now()
+                               END
+                           )
+                      FROM prev
+                     WHERE i.id = prev.id AND prev.state <> 'active'
+                    RETURNING i.id, i.due_at
+                ),
+                logged AS (
+                    INSERT INTO {settings.db_schema}.transitions
+                      (item_id, from_state, to_state, reason)
+                    SELECT prev.id, prev.state, 'active',
+                           CASE
+                             WHEN prev.state::text = ANY(%(reactivated)s)
+                               THEN 'reactivation'
+                             ELSE 'manual'
+                           END::{settings.db_schema}.transition_reason
+                      FROM prev JOIN upd ON upd.id = prev.id
+                )
+                SELECT prev.state::text AS previous,
+                       coalesce((SELECT due_at FROM upd), prev.due_at) AS due_at,
+                       (SELECT count(*) FROM upd) > 0 AS changed
+                  FROM prev
+                """,
+                {
+                    "item_id": item_id,
+                    "user_id": user_id,
+                    "due_at": due_at,
+                    "reactivated": list(_REACTIVATED_FROM),
+                },
+            )
+            columns = [c.name for c in result.description or []]
+            row = await result.fetchone()
+            return dict(zip(columns, row)) if row else None
 
 
 _db_instance: Optional[Database] = None

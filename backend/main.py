@@ -24,6 +24,7 @@ from backend.auth import PUBLIC_PATHS, authenticate, current_user_id
 from backend.config import capture_tz, settings
 from backend.db import Database, close_db, get_db, init_db
 from backend.parse import ParseError, ParseResult, parse_capture, parse_split
+from backend.push import is_expo_token
 from backend.storage import StorageError, delete_audio, signed_url, upload_audio
 from backend.transcribe import Transcript, TranscriptionError, transcribe
 
@@ -206,6 +207,64 @@ class DoneResponse(BaseModel):
     changed: bool
 
 
+class DeviceRegistration(BaseModel):
+    """Body for POST /devices — where this user's pushes should go (UC23)."""
+
+    token: str = Field(..., description="Expo push token from the device")
+    platform: str = Field(default="android", description="android, ios or web")
+    device_name: Optional[str] = Field(
+        default=None, description="Free text, for telling two devices apart"
+    )
+
+
+class DeviceResponse(BaseModel):
+    """Response for POST /devices."""
+
+    registered: bool
+    devices: int
+
+
+class SnoozeRequest(BaseModel):
+    """Body for POST /items/{item_id}/snooze (UC17). Empty means the default."""
+
+    minutes: Optional[int] = Field(
+        default=None, gt=0, description="How far out to push the due time"
+    )
+
+
+class SnoozeResponse(BaseModel):
+    """Response for a snooze.
+
+    `changed` is False when the item was not `active` — a notification acted
+    on after the item has already decayed. Not an error; the app says where
+    the item actually went.
+    """
+
+    id: str
+    state: str
+    due_at: Optional[datetime] = None
+    snooze_count: int
+    changed: bool
+
+
+class ReactivateRequest(BaseModel):
+    """Body for POST /items/{item_id}/reactivate (UC20). Empty is the usual."""
+
+    due_at: Optional[datetime] = Field(
+        default=None, description="When it should come back; defaults to now"
+    )
+
+
+class ReactivateResponse(BaseModel):
+    """Response for a reactivation."""
+
+    id: str
+    state: str
+    previous: str
+    due_at: Optional[datetime] = None
+    changed: bool
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # type: ignore
     """Manage app startup and shutdown."""
@@ -258,6 +317,7 @@ async def health(db: Database = Depends(get_db)) -> HealthResponse:
 
 SOURCES = ("voice", "text", "widget")
 STATES = ("active", "shelved", "done", "dropped")
+PLATFORMS = ("android", "ios", "web")
 
 
 def _require_source(source: str) -> str:
@@ -967,6 +1027,158 @@ async def mark_item_done(
         raise HTTPException(status_code=404, detail="No such item")
 
     return DoneResponse(id=str(item_id), state="done", changed=previous != "done")
+
+
+@app.post("/devices", response_model=DeviceResponse)
+async def register_device(
+    request: DeviceRegistration,
+    db: Database = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+) -> DeviceResponse:
+    """Tell the server where to send this user's pushes (UC23).
+
+    The app calls this on every launch, not just the first: Expo reissues a
+    token when the app is reinstalled or its data is cleared, and a stale
+    token is a reminder that goes nowhere with nothing to show for it. The
+    write is an upsert keyed on the token, so calling it repeatedly is free.
+
+    Args:
+        request: The token, and what kind of device it came from.
+        db: Database connection.
+        user_id: Authenticated user, from the Supabase token.
+
+    Returns:
+        Whether it registered, and how many live devices this user now has.
+
+    Raises:
+        HTTPException: 400 if the token is not an Expo push token — a
+            malformed one stored now is a silent non-delivery later, and by
+            then the device is not around to ask again.
+    """
+    token = request.token.strip()
+    if not is_expo_token(token):
+        raise HTTPException(status_code=400, detail="Not an Expo push token")
+    if request.platform not in PLATFORMS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"platform must be one of {', '.join(PLATFORMS)}",
+        )
+
+    try:
+        registered = await db.register_push_token(
+            user_id=user_id,
+            token=token,
+            platform=request.platform,
+            device_name=request.device_name,
+        )
+        devices = await db.push_token_count(user_id)
+    except Exception as e:
+        logger.error("Failed to register a device for %s: %s", user_id, e)
+        raise HTTPException(status_code=500, detail="Failed to register device")
+
+    return DeviceResponse(registered=registered, devices=devices)
+
+
+@app.post("/items/{item_id}/snooze", response_model=SnoozeResponse)
+async def snooze_item(
+    item_id: UUID,
+    request: Optional[SnoozeRequest] = None,
+    db: Database = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+) -> SnoozeResponse:
+    """Not now (UC17).
+
+    Pushes the due time out and counts the decline. A snooze is not a free
+    pass: it feeds the same threshold an ignore does (UC18), because both are
+    the user saying "not now" and the system's whole job is to read that.
+
+    Answering a push for an item that has already decayed is not an error —
+    the push was real when it was sent — so this returns `changed = False` and
+    the item's actual state rather than a 404 or a 409.
+
+    Args:
+        item_id: Item to put off.
+        request: How long for. Omitted means `SNOOZE_MINUTES`.
+        db: Database connection.
+        user_id: Authenticated user, from the Supabase token.
+
+    Returns:
+        The item's state, new due time and snooze count.
+
+    Raises:
+        HTTPException: 400 if the duration is beyond the ceiling, 404 if this
+            user has no such item.
+    """
+    minutes = (request.minutes if request else None) or settings.snooze_minutes
+    if minutes > settings.max_snooze_minutes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"snooze cannot exceed {settings.max_snooze_minutes} minutes",
+        )
+
+    try:
+        row = await db.snooze_item(str(item_id), user_id, minutes)
+    except Exception as e:
+        logger.error("Failed to snooze item %s: %s", item_id, e)
+        raise HTTPException(status_code=500, detail="Failed to snooze item")
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="No such item")
+
+    return SnoozeResponse(
+        id=str(item_id),
+        state="active" if row["changed"] else row["state"],
+        due_at=row["due_at"],
+        snooze_count=row["snooze_count"],
+        changed=row["changed"],
+    )
+
+
+@app.post("/items/{item_id}/reactivate", response_model=ReactivateResponse)
+async def reactivate_item(
+    item_id: UUID,
+    request: Optional[ReactivateRequest] = None,
+    db: Database = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+) -> ReactivateResponse:
+    """Take an item back off the shelf (UC20).
+
+    Decay is silent (UC22 was dropped), so this is the counterweight: the one
+    obvious action that undoes what the system decided on its own. It also
+    gives the item a due time, because an `active` item without one is
+    invisible — `Today` is bounded on `due_at` (D17) and the scheduler only
+    pushes what is due.
+
+    Args:
+        item_id: Item to bring back.
+        request: When it should come back. Omitted means now.
+        db: Database connection.
+        user_id: Authenticated user, from the Supabase token.
+
+    Returns:
+        Where it came from, where it is, and when it is next due.
+
+    Raises:
+        HTTPException: 404 if this user has no such item.
+    """
+    try:
+        row = await db.reactivate_item(
+            str(item_id), user_id, request.due_at if request else None
+        )
+    except Exception as e:
+        logger.error("Failed to reactivate item %s: %s", item_id, e)
+        raise HTTPException(status_code=500, detail="Failed to reactivate item")
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="No such item")
+
+    return ReactivateResponse(
+        id=str(item_id),
+        state="active",
+        previous=row["previous"],
+        due_at=row["due_at"],
+        changed=row["changed"],
+    )
 
 
 if __name__ == "__main__":

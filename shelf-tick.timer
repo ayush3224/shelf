@@ -1,0 +1,16 @@
+[Unit]
+Description=Run the Shelf scheduler tick every minute
+# The timer is what `CLAUDE.md` calls "Railway cron, 1-minute tick". The API
+# lives on a VPS under systemd rather than on Railway, so this is the same
+# idea in the form this host actually has.
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+# Fire on the minute rather than drifting by the tick's own duration.
+AccuracySec=5s
+Persistent=false
+Unit=shelf-tick.service
+
+[Install]
+WantedBy=timers.target

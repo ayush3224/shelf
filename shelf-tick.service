@@ -1,0 +1,17 @@
+[Unit]
+Description=Shelf scheduler tick — push delivery and decay (UC23, UC18, UC19)
+After=network-online.target shelf.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/shelf
+Environment="PATH=/root/shelf/venv/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/root/shelf/.env
+ExecStart=/root/shelf/venv/bin/python -m backend.scheduler
+# A tick is milliseconds of SQL plus one HTTPS call. If it has not finished in
+# a minute, the next one would overlap it — systemd will not start a second
+# copy of a running unit, but a hung one should die rather than block the
+# schedule indefinitely.
+TimeoutStartSec=50

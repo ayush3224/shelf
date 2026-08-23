@@ -67,6 +67,34 @@ class Settings(BaseSettings):
     # synthetic audio the first value was set from (D27).
     transcript_confidence_floor: float = 0.5
 
+    # Push delivery (UC23), via Expo's push service in front of FCM. The
+    # access token is only needed if push security is enabled on the Expo
+    # account; without it the endpoint accepts unauthenticated sends.
+    expo_push_url: str = "https://exp.host/--/api/v2/push/send"
+    expo_access_token: str = ""
+    # Android notification channel and the category carrying the done/snooze
+    # buttons. Both are created by the app; the server names them in every
+    # message, so the two sides have to agree and these are that agreement.
+    push_channel_id: str = "reminders"
+    push_category_id: str = "shelf.reminder"
+
+    # How long an unanswered push waits before the next one comes due — and
+    # with it, the write that reads the silence as `ignored` (D32). Three of
+    # these is a shelving, so this constant sets how fast decay actually runs.
+    push_repeat_minutes: int = 60
+    # Default snooze (UC17). The client may ask for another value; anything
+    # past the ceiling is refused rather than quietly clamped.
+    snooze_minutes: int = 30
+    max_snooze_minutes: int = 60 * 24 * 7
+
+    # How many notifications one tick will try to send. A cap so that a first
+    # run against a backlog cannot turn into a hundred pushes at once.
+    push_batch_limit: int = 20
+    # After this many failed attempts the row stalls instead of being retried
+    # forever. It is never marked sent, so a broken delivery path cannot decay
+    # anything (D32).
+    push_max_attempts: int = 5
+
     model_config = {
         "env_file": ".env",
         "case_sensitive": False,
