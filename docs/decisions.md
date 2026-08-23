@@ -221,6 +221,25 @@ rather than that the words did not come.
 *Revisit if:* 429s become common rather than incidental. That is the free tier
 being outgrown, and the answer is a paid tier, not more retries.
 
+**D26 — The multipart file part is an `expo-file-system` `File`, not React
+Native's `{uri, name, type}`.**
+Expo installs its own WinterCG `fetch` over the global
+(`expo/src/winter/runtime.native.ts` — `install('fetch', ...)`, unless
+`EXPO_PUBLIC_USE_RN_FETCH` is set). Its multipart encoder accepts a part only
+if it is a string, a `Blob`, or an object exposing `bytes()`; anything else
+throws `Unsupported FormDataPart implementation` before the request is
+dispatched. Expo's own source says it plainly: "`uri` is not supported for
+React Native's FormData".
+So the RN file-part shape — which is correct, and only correct, for RN's
+XHR-based `fetch` — silently could not be sent. `File` satisfies the encoder
+directly: `bytes()` supplies the body, `name` and `type` become the part's
+`filename` and `content-type`, and it still streams from disk.
+*Consequence for tests:* asserting what the client passes to `FormData.append`
+proves nothing, because the failure is in what the *encoder* will accept. The
+body is now tested by running it through `convertFormDataAsync` itself.
+*Revisit if:* the app ever sets `EXPO_PUBLIC_USE_RN_FETCH=1`, which restores
+RN's fetch and inverts this — then the RN shape becomes the correct one.
+
 ---
 
 ## Open

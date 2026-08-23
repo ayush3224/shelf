@@ -5,6 +5,8 @@
  * is read fresh per request rather than captured once, because `getSession`
  * refreshes it when it has expired and a cached copy would go stale mid-session.
  */
+import { File } from 'expo-file-system';
+
 import { API_BASE_URL } from './config';
 import { supabase } from './supabase';
 
@@ -241,24 +243,47 @@ export function capture(text: string): Promise<CaptureResponse> {
 /**
  * Upload a recording (UC1, UC7, UC8).
  *
- * The file is sent by URI rather than read into memory: React Native's
- * `FormData` streams it from disk, and a base64 round-trip of a minute of
- * audio is a needless spike on a phone.
+ * The file part is an `expo-file-system` `File`, **not** React Native's
+ * `{uri, name, type}` object. That distinction is the whole reason voice
+ * capture was failing: Expo installs its own WinterCG `fetch` over the global
+ * (`expo/src/winter/runtime.native.ts`), and its multipart encoder accepts a
+ * part only if it is a string, a `Blob`, or an object exposing `bytes()`.
+ * A bare `{uri, ...}` is none of those, so it threw
+ * `Unsupported FormDataPart implementation` before anything was dispatched —
+ * which is why nothing ever reached the server.
+ *
+ * Expo's own source says so outright: "`uri` is not supported for React
+ * Native's FormData". The RN shape is only correct for RN's XHR-based fetch,
+ * which this app does not use.
+ *
+ * `File` satisfies the encoder directly: `bytes()` supplies the body, and
+ * `name` and `type` become the part's `filename` and `content-type`. It also
+ * still streams from disk rather than being read into JS.
  *
  * `transcript` is for an on-device recognition result. Sending one skips the
  * cloud transcriber entirely; sending none means the server transcribes.
  */
-export function captureAudio(
+export async function captureAudio(
   recording: { uri: string; name: string; mimeType: string },
   options: { transcript?: string; confidence?: number } = {},
 ): Promise<AudioCaptureResponse> {
+  let file: File;
+  try {
+    file = new File(recording.uri);
+  } catch (e) {
+    // A URI that will not open is ours, not the network's.
+    logFailure('/capture/audio', e, 'client');
+    throw new ApiError(
+      0,
+      'The app could not open that recording.',
+      'client',
+      e,
+    );
+  }
+
   const form = new FormData();
-  form.append('audio', {
-    uri: recording.uri,
-    name: recording.name,
-    type: recording.mimeType,
-    // RN's FormData takes this shape; the DOM's typings do not describe it.
-  } as unknown as Blob);
+  // Typed as Blob because `File` implements the interface without extending it.
+  form.append('audio', file as unknown as Blob);
   form.append('source', 'voice');
   if (options.transcript) form.append('transcript', options.transcript);
   if (options.confidence !== undefined) {

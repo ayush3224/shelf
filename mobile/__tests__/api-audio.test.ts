@@ -1,9 +1,12 @@
 /**
- * The audio capture request (UC1, UC7).
+ * The audio capture request (UC1, UC7) — headers, routing and error mapping.
  *
- * What is worth pinning here is the shape of the request rather than the
- * response: a multipart upload has one classic way of failing silently, and it
- * fails as an empty parse server-side rather than as an error the client sees.
+ * The body itself is tested in `multipart-body.test.ts`, by running it through
+ * Expo's real encoder. It is deliberately not tested here any more: this suite
+ * used to assert that `append` received `{uri, name, type}`, which is to say it
+ * asserted the client agreed with itself. It passed while every capture on the
+ * device failed, because nothing here ever asked whether the thing being sent
+ * could be encoded.
  */
 import { audioUrl, captureAudio } from '../lib/api';
 import { supabase } from '../lib/supabase';
@@ -17,6 +20,22 @@ jest.mock('expo-web-browser', () => ({
   openAuthSessionAsync: jest.fn(async () => ({ type: 'cancel' })),
   warmUpAsync: jest.fn(),
   coolDownAsync: jest.fn(),
+}));
+jest.mock('expo-file-system', () => ({
+  // Written with plain fields: a TypeScript parameter property transpiles to
+  // something jest's out-of-scope check rejects inside a mock factory.
+  File: class {
+    uri: string;
+    name: string;
+    type = 'audio/mp4';
+    constructor(uri: string) {
+      this.uri = uri;
+      this.name = uri.split('/').pop() as string;
+    }
+    async bytes() {
+      return new Uint8Array([1, 2, 3]);
+    }
+  },
 }));
 
 const recording = {
@@ -40,29 +59,6 @@ function stubApi(body: unknown, status = 200): Sent[] {
     };
   }) as unknown as typeof fetch;
   return sent;
-}
-
-/**
- * Record what was appended to a FormData.
- *
- * Reading the FormData back does not work: React Native's implementation keeps
- * the `{uri, name, type}` file descriptor as an object, while the standard one
- * this test runs under coerces it to "[object Object]". Spying on `append`
- * captures what the code passed, which is the thing under test.
- */
-let appended: [string, unknown][] = [];
-
-beforeEach(() => {
-  appended = [];
-  jest
-    .spyOn(FormData.prototype, 'append')
-    .mockImplementation((key: string, value: unknown) => {
-      appended.push([key, value]);
-    });
-});
-
-function parts(): [string, unknown][] {
-  return appended;
 }
 
 beforeEach(() => {
@@ -94,38 +90,11 @@ describe('captureAudio', () => {
     expect(headers.Authorization).toBe('Bearer test-token');
   });
 
-  it('sends the file by URI and marks the capture as voice', async () => {
+  it('posts to the audio route', async () => {
     const sent = stubApi({ id: 'i1', items: [] });
     await captureAudio(recording);
-
-    const entries = Object.fromEntries(parts());
     expect(sent[0].url).toContain('/capture/audio');
-    expect(entries.source).toBe('voice');
-    expect(entries.audio).toMatchObject({
-      uri: recording.uri,
-      name: recording.name,
-      type: recording.mimeType,
-    });
-  });
-
-  it('omits the transcript fields when there is no on-device transcript', async () => {
-    const sent = stubApi({ id: 'i1', items: [] });
-    await captureAudio(recording);
-
-    const keys = parts().map(([key]) => key);
-    // Sending an empty transcript would make the server skip the cloud path
-    // and store a capture with no words at all.
-    expect(keys).not.toContain('transcript');
-    expect(keys).not.toContain('transcript_confidence');
-  });
-
-  it('passes an on-device transcript through when there is one', async () => {
-    const sent = stubApi({ id: 'i1', items: [] });
-    await captureAudio(recording, { transcript: 'call the bank', confidence: 0.9 });
-
-    const entries = Object.fromEntries(parts());
-    expect(entries.transcript).toBe('call the bank');
-    expect(entries.transcript_confidence).toBe('0.9');
+    expect(sent[0].init.method).toBe('POST');
   });
 
   it('reports a refused upload as an ApiError carrying the server detail', async () => {

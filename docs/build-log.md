@@ -150,11 +150,11 @@ off-site copy is still worth adding.
 | Timezone handling (IST) | ✅ tested — "tomorrow 3pm" → 09:30Z |
 | `GET /items/today`, `POST /items/{id}/done` | ⚠️ built, needs service restart |
 | Expo app: capture, today, sign-in | ⚠️ built, never run on a phone |
-| Voice capture, hold-to-record (UC1) | ⚠️ API verified live; UI never run on a phone |
+| Voice capture, hold-to-record (UC1) | ⚠️ upload body fixed (D26); not yet re-run on a phone |
 | Audio stored + signed playback (UC7) | ✅ verified live, byte-identical |
 | Cloud transcription (UC8) | ✅ verified live — Groq turbo, 1.6s round trip |
 | Multi-item splitting (UC4) | ⚠️ built, never run against real Haiku |
-| Mobile test suite (jest-expo) | ✅ 55 tests |
+| Mobile test suite (jest-expo) | ✅ 61 tests |
 | Backend test suite | ✅ 164 tests |
 | Native dep tree vs SDK 57 matrix | ✅ reconciled, `expo-doctor` 21/21 |
 | Google OAuth redirect handling | ✅ callback swallowed, not routed |
@@ -747,3 +747,61 @@ would fail every capture with a 400.
 55 mobile tests (26 new), 164 backend tests, lint and typecheck clean.
 **No root cause yet** — this makes the next failure name itself instead
 of blaming the server.
+
+### 23 August 2026 — the upload body was never sendable
+
+`Unsupported FormDataPart implementation`, and the string led straight to
+it: `expo/src/winter/fetch/convertFormData.ts`. Not React Native.
+
+**Expo replaces the global `fetch`.** `winter/runtime.native.ts` ends with
+`install('fetch', () => require('./fetch').fetch)`, guarded only by an
+`EXPO_PUBLIC_USE_RN_FETCH` escape hatch nothing here sets. So the app has
+never been using RN's XHR-based `fetch`, and RN's `FormData.getParts()` —
+which I read last session and pronounced a match — is not what encodes
+the body. Reading the right file about the wrong runtime.
+
+What actually consumes it accepts a part only if it is a string, a `Blob`,
+or an object exposing `bytes()`, and throws otherwise. Expo's source says
+so in a comment two lines up: *"`uri` is not supported for React Native's
+FormData."* The `{uri, name, type}` object is none of the three, so every
+voice capture died before dispatch — which is exactly why nothing ever
+appeared in Caddy.
+
+Traced the rest of the mechanism to be sure: `installFormDataPatch`
+patches RN's FormData in place rather than replacing it, `normalizeArgs`
+passes objects through untouched, `entries()` yields them verbatim, and
+the encoder's final `else` throws. Nothing was mangling the object; it was
+simply never a shape anything could send.
+
+**Fixed** by appending an `expo-file-system` `File` (D26). It satisfies
+the encoder directly — `bytes()` for the body, `name` and `type` for the
+part headers — and still streams from disk instead of being read into JS.
+`File.type` reports `audio/mp4`, which is the spelling the bucket's
+allow-list wants, and if it ever reports nothing the server still recovers
+the format from the filename.
+
+**The tests were the other half of the bug.** `api-audio.test.ts` spied on
+`FormData.append` and asserted it received `{uri, name, type}` — it
+asserted the client agreed with itself, and passed happily while every
+capture on the device failed. Nothing in it ever asked whether the thing
+being sent could be encoded.
+
+Replaced with `multipart-body.test.ts`, which runs the body through
+Expo's real `convertFormDataAsync`. Verified it earns its place: reverting
+`captureAudio` to the old shape turns 6 of its 8 assertions red, including
+one that reproduces the device's exact error string. One test pins the
+constraint directly — the RN shape *must* be rejected — so nobody
+simplifies back to it.
+
+Getting that test faithful took two attempts, and the first failure was
+instructive. Jest supplies a standards-compliant `FormData`, which coerces
+a non-Blob object to `"[object Object]"` on append — so the file part
+never reached the encoder and the test proved nothing, which is the same
+class of mistake as the original. It now uses React Native's real
+FormData, which keeps objects verbatim. `installFormDataPatch` adds
+`entries()` with `??=`, which does not take effect under this transform,
+so that one line is bridged explicitly; everything either side of it is
+the real implementation.
+
+61 mobile tests, 164 backend, lint and typecheck clean. Not yet re-run on
+a phone.
