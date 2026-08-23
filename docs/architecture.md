@@ -21,7 +21,7 @@
 │  · cron: 1-min tick           │
 └───────────┬──────────────────┘      ┌──────────────────┐
             │                          │ Google Calendar  │
-┌───────────▼──────────────────┐      │  (phase 5)       │
+┌───────────▼──────────────────┐      │  (session 5)     │
 │  Supabase                     │      └──────────────────┘
 │  Postgres · Auth · Storage    │
 └──────────────────────────────┘
@@ -69,10 +69,16 @@ Pure SQL, no model calls:
 - Prior notification unanswered → write `response = 'ignored'`,
   increment `push_count`.
 - `push_count >= SHELVE_AFTER_IGNORES` → transition to `shelved`,
-  reason `decay`, and send the announcement (UC22).
+  reason `decay`. **Silently** — UC22 was dropped, so nothing announces it.
 - `state = 'shelved'` and `state_changed_at < now() - DROP_AFTER_DAYS`
-  → transition to `dropped`, reason `expiry`.
-- Respect `QUIET_HOURS` for everything except `critical`.
+  → transition to `dropped`, reason `expiry`. Also silent.
+
+UC29 (quiet hours) was dropped too, so nothing suppresses an overnight push.
+`QUIET_HOURS` remains in the config module but is unused; leaving it there is
+cheaper than removing it and re-deriving it if the decision reverses.
+
+With both dropped, the `transitions` table and the weekly digest (UC31) are
+the only places decay is observable at all.
 
 ## Delivery tiers
 
@@ -82,14 +88,31 @@ Pure SQL, no model calls:
 | Alarm | `critical`, or already ignored twice | native full-screen intent, bypasses DND |
 | Call | opt-in, must-not-miss (P2) | CallMeBot HTTP GET |
 
-## Natural-language query (UC35)
+## ~~Natural-language query (UC35)~~ — dropped
 
-One Haiku call turns the question into SQL against a fixed, read-only
-view. Execute it, return rows. **Never** load table contents into the
-prompt — the model sees the schema, not the data.
+Was to be one Haiku call turning a question into SQL against the read-only
+`v_items_query` view. Dropped 23 August 2026 (owner's decision). Retrieval is
+UC33 (browse) and UC34 (search), both plain SQL with no model call.
 
-Guard: allow-list of tables, `SELECT` only, hard `LIMIT`, statement
-timeout.
+`v_items_query` still exists in migration 001. It is now unused; it costs
+nothing and would be needed again if this ever came back.
+
+## People (UC45-47)
+
+`entities` and `links` have been in the schema since migration 001 (D7). The
+module is extraction plus UI on top of them, not a migration:
+
+- The parse already returns `entities` — `{type, name}` for people, orgs and
+  places named in a capture. Today they are returned and discarded.
+- UC45 stores them: upsert into `entities` on `(user_id, type, name)`, then
+  write a `links` row per mention.
+- UC46 reads back the other way — every item linked to one entity, oldest
+  first.
+- UC47 lists and searches `entities`.
+
+**Recall is manual and stays that way for now.** No calendar triggering, no
+proactive surfacing. That needs UC43 and a delivery tier, and it should not
+be built before the manual version has been used.
 
 ## Google Calendar (UC43)
 

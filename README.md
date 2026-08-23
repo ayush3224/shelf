@@ -11,8 +11,8 @@ them by hand.
 | File | What's in it |
 |------|--------------|
 | `CLAUDE.md` | Context for Claude Code. Read first. |
-| `PLAN.md` | Phased build order with exit criteria. |
-| `docs/use-cases.md` | All 44 use cases, with IDs and priorities. |
+| `PLAN.md` | Build order as five sessions, each with an exit criterion. |
+| `docs/use-cases.md` | Every use case with its ID, priority and status. Dropped ones are kept, struck through. |
 | `docs/data-model.md` | Schema, state machine, parse contract. |
 | `docs/architecture.md` | Components, flows, external services. |
 | `docs/decisions.md` | Decisions made, and what's still open. |
@@ -25,4 +25,4 @@ them by hand.
 cp .env.example .env      # fill in the blanks
 ```
 
-Then Phase 0 in `PLAN.md`.
+Then `PLAN.md` — "Already built" says what exists, and session 2 is next.

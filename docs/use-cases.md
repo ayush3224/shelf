@@ -2,18 +2,22 @@
 
 Canonical list. Reference by ID in commits, PRs, and issues.
 
-P0 = v1 · P1 = shortly after · P2 = later
+P0 = v1 · P1 = shortly after · P2 = later · — = dropped or deferred
+
+Dropped rows are struck through and kept, never deleted: the IDs appear in
+commits, decisions and the build log, and reusing one would silently repoint
+that history at something else.
 
 ## Capture
 
 | ID | Use case | Pri |
 |----|----------|-----|
 | UC1 | Record a voice note from the app's home screen | P0 |
-| UC2 | Record from a home-screen widget without opening the app | P1 |
+| UC2 | Record from a home-screen widget without opening the app — **deferred** pending real usage; not cancelled | — |
 | UC3 | Record from lock screen / quick-settings tile | P2 |
 | UC4 | Speak several items in one note; system splits them | P1 |
 | UC5 | Type an item instead of speaking | P0 |
-| UC6 | Capture offline; queue and sync on reconnect | P1 |
+| ~~UC6~~ | ~~Capture offline; queue and sync on reconnect~~ — **dropped** by the owner, not a technical limit. A capture with no connection fails and is retried by hand. | — |
 | UC7 | Original audio retained and playable on the item | P1 |
 
 ## Parse & classify
@@ -23,7 +27,7 @@ P0 = v1 · P1 = shortly after · P2 = later
 | UC8 | Transcribe speech to text | P0 |
 | UC9 | Classify as task / note / person-note | P0 |
 | UC10 | Extract due date-time from natural language | P0 |
-| UC11 | Infer project or tag from content | P1 |
+| ~~UC11~~ | ~~Infer project or tag from content~~ — **dropped** by the owner, not a technical limit. `project_hint` stays returned-but-unstored. | — |
 | UC12 | Set initial state — active if timed, shelved if not | P0 |
 | UC13 | Detect reference to an existing item; update, don't duplicate | P2 |
 | UC14 | Flag critical from spoken cues | P1 |
@@ -37,21 +41,21 @@ P0 = v1 · P1 = shortly after · P2 = later
 | UC17 | Snooze a reminder | P0 |
 | UC18 | Auto-shelve after N ignored or snoozed pushes | P0 |
 | UC19 | Auto-drop after M days shelved and untouched | P1 |
-| UC20 | Reactivate by mentioning the item in a new note | P1 |
+| UC20 | Reactivate a shelved item — an in-app action on the shelf, **not** a spoken re-mention | P1 |
 | UC21 | Manually move an item between any two states | P0 |
-| UC22 | Announce every automatic transition | P1 |
+| ~~UC22~~ | ~~Announce every automatic transition~~ — **dropped** by the owner, not a technical limit. Decay now happens silently; see the note under "Dropped scope". | — |
 
 ## Reminders & delivery
 
 | ID | Use case | Pri |
 |----|----------|-----|
 | UC23 | Push notification at due time | P0 |
-| UC24 | Full-screen alarm that breaks DND for critical items | P1 |
+| UC24 | Full-screen alarm that breaks DND for critical items — **deferred** pending real usage; not cancelled | — |
 | UC25 | Reminder spoken in a known person's recorded voice | P2 |
 | UC26 | Voice call for must-not-miss items | P2 |
 | UC27 | *(superseded by UC43)* | — |
 | UC28 | Escalation ladder: push → alarm → call | P2 |
-| UC29 | Quiet hours; nothing fires overnight except critical | P1 |
+| ~~UC29~~ | ~~Quiet hours; nothing fires overnight except critical~~ — **dropped** by the owner, not a technical limit. Pushes may fire overnight. | — |
 
 ## Review
 
@@ -67,7 +71,7 @@ P0 = v1 · P1 = shortly after · P2 = later
 |----|----------|-----|
 | UC33 | Browse the shelf, grouped by project | P0 |
 | UC34 | Text search across all items | P0 |
-| UC35 | Natural-language query over notes | P1 |
+| ~~UC35~~ | ~~Natural-language query over notes~~ — **dropped** by the owner, not a technical limit. Retrieval is UC33 and UC34. | — |
 | UC36 | Filter by state, project, date range | P1 |
 | UC37 | Item detail with original audio | P1 |
 
@@ -81,6 +85,30 @@ P0 = v1 · P1 = shortly after · P2 = later
 | UC41 | Auth — single user, private | P0 |
 | UC42 | Graceful failure: keep raw audio, flag for review | P0 |
 
+## People
+
+The second thing this system is for: remembering what was said about whom.
+`entities` and `links` have existed since migration 001 for exactly this —
+they were built early so that adding people later would be a write rather
+than a backfill over every note ever captured (D7).
+
+| ID | Use case | Pri |
+|----|----------|-----|
+| UC45 | Voice-record a note about a person; the parse extracts who it is about and links the note to them | P1 |
+| UC46 | Person page — everything ever said about them, oldest to newest | P1 |
+| UC47 | Browse and search people | P1 |
+
+**Recall is manual, deliberately.** You go and look someone up. There is no
+calendar triggering and no proactive surfacing — no "you are meeting Ravi in
+an hour, here is what you said last time". That is a real idea and it is
+explicitly deferred, not forgotten: it needs UC43's calendar link and a
+delivery tier, and it should not be built before the manual version has been
+used enough to know what is worth surfacing.
+
+UC44 (the Obsidian-style linked graph) stays P2 and unscheduled. UC45-47 are
+the practical first cut of the same data: the same tables, without the graph
+UI.
+
 ## Integrations
 
 | ID | Use case | Pri |
@@ -88,4 +116,26 @@ P0 = v1 · P1 = shortly after · P2 = later
 | UC43 | Write to personal Google Calendar from the app | P1 |
 | UC44 | Obsidian-style linked network of people and notes | P2 |
 
-**Totals:** 43 active use cases (UC27 folded into UC43), 16 at P0.
+## Dropped scope
+
+Five use cases were dropped on 23 August 2026. All owner decisions, none
+technical:
+
+| ID | Was | Consequence to be aware of |
+|----|-----|----------------------------|
+| UC6 | Offline capture queue | A capture made with no connection fails; the words stay in the box and the recording stays on the device, but sending is a manual retry |
+| UC11 | Project inference | `projects` and `items.project_id` exist and stay empty; UC33's "grouped by project" becomes a flat list |
+| UC22 | Announce every transition | Decay is silent — items shelve and drop without saying so |
+| UC29 | Quiet hours | Nothing suppresses an overnight push |
+| UC35 | Natural-language query | — |
+
+**UC22 is the one with teeth.** "Every automatic transition is announced,
+never silent" was a stated principle in `CLAUDE.md`, and dropping it means
+UC18 and UC19 move items without telling anyone. The weekly digest (UC31)
+becomes the only place decay is visible, which makes it load-bearing rather
+than a nicety. `CLAUDE.md` has been updated to match; reversing this means
+reversing that line too.
+
+**Totals:** 41 active (UC27 folded into UC43; UC6, UC11, UC22, UC29, UC35
+dropped), of which 19 were P0 and 15 remain — UC15, UC17, UC18 and UC23 are
+the outstanding ones. UC2 and UC24 are deferred rather than dropped.

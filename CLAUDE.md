@@ -19,10 +19,15 @@ Four states: `active`, `shelved`, `done`, `dropped`.
 - Captured with a time → `active`. Captured without → `shelved`.
 - Ignored or snoozed N times → auto-`shelved` (decay).
 - `shelved` and untouched for M days → auto-`dropped`.
-- Mentioned again in a new note → back to `active` (reactivation).
+- Reactivated by hand from the shelf → back to `active` (UC20).
 - Only `done` is ever set explicitly, by one tap or one word.
 
-Every automatic transition is **announced, never silent**.
+Automatic transitions used to be announced. **UC22 was dropped on 23 August
+2026** (owner's decision), so decay is now silent: items shelve and drop
+without saying so. The weekly digest (UC31) becomes the only place it is
+visible, which makes that feature load-bearing rather than a nicety. If
+silent decay turns out to feel like things vanishing, reversing it means
+reviving UC22 and restoring this line.
 
 If a proposed feature requires the user to do admin work to keep state
 accurate, it is the wrong feature. Push back on it.
@@ -44,14 +49,14 @@ accurate, it is the wrong feature. Push back on it.
 | Layer      | Choice |
 |------------|--------|
 | Mobile     | Expo / React Native, TypeScript |
-| Native     | Two thin modules: full-screen-intent alarm, home-screen widget |
+| Native     | None yet. The full-screen alarm (UC24) and widget (UC2) are deferred pending real usage |
 | Backend    | FastAPI (Python) on Railway |
 | DB / Auth / Storage | Supabase (Postgres, Auth, Storage for audio) |
 | LLM        | Claude `claude-haiku-4-5` via the Anthropic API |
 | STT        | Whisper (`whisper-large-v3-turbo`) on Groq, free tier. On-device `SpeechRecognizer` was dropped — see D20 |
 | Scheduler  | Railway cron, 1-minute tick |
-| Calendar   | Google Calendar API (OAuth) — phase 5 |
-| Voice call | CallMeBot — phase 6, optional |
+| Calendar   | Google Calendar API (OAuth) — session 5 |
+| Voice call | CallMeBot — unscheduled (UC26, P2) |
 
 ## Cost rules (hard)
 
@@ -61,8 +66,9 @@ These are non-negotiable; they're why the monthly bill stays under $1.
   to Sonnet or Opus.
 - **`max_tokens` capped at 200** on the parse call. Output is 5x input.
 - **Never send table rows to the model.** Decay, digests, `Today`,
-  overdue, counts — all SQL. For natural-language queries, generate SQL
-  with one small call and execute it; do not load rows into context.
+  overdue, counts, search — all SQL. (This rule used to carve out
+  natural-language queries; UC35 was dropped, so there is no longer any
+  path that puts rows in front of the model at all.)
 - **No prompt caching.** Captures are sporadic; the 5-min cache would be
   cold on most calls and you'd pay the write premium for nothing.
 - **Batch API for the weekly digest.** It can wait; it's 50% off.
@@ -74,21 +80,27 @@ These are non-negotiable; they're why the monthly bill stays under $1.
 - Migrations: numbered SQL files in `/migrations`, never edit an applied one.
 - Secrets in `.env`, never committed. `.env.example` stays current.
 - Commits: conventional commits (`feat:`, `fix:`, `chore:`).
-- One PR per phase milestone, not per file.
+- **Commit directly to `main`.** This is deliberate, not laziness: one
+  committer, no review to wait for, and a PR that only ever merges itself is
+  ceremony. Commit per coherent change, not per file. Revisit if a second
+  person ever commits.
 
 ## Where things are
 
-- `PLAN.md` — phased build order. Start here.
-- `docs/use-cases.md` — all 44 use cases with IDs and priorities.
+- `PLAN.md` — build order as five sessions. Start here.
+- `docs/use-cases.md` — every use case with its ID, priority and status.
+  Dropped ones are struck through and kept; the IDs are never reused.
 - `docs/data-model.md` — schema, states, transition rules.
 - `docs/architecture.md` — components, data flow, external services.
 - `docs/decisions.md` — decisions made, and open questions.
 
 ## Working agreement
 
-- Reference use cases by ID (UC1, UC18) in commits and PRs.
+- Reference use cases by ID (UC1, UC18) in commits.
 - If a use case is ambiguous, ask before implementing an interpretation.
-- Don't build P1/P2 work while P0 is incomplete.
+- Follow the session order in `PLAN.md`. It already puts the remaining P0
+  work (session 2) ahead of the P1 sessions, so "no P1 before P0 is done"
+  is the same rule stated once instead of twice.
 - Update `docs/decisions.md` when a real decision gets made.
 - After completing work in a session, append an entry to
   docs/build-log.md and update its Current state table.

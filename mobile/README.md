@@ -1,9 +1,10 @@
 # Shelf — mobile
 
-Expo / React Native (TypeScript). Phase 1 only: capture typed text, and finish
-what's due today.
+Expo / React Native (TypeScript). Capture by voice or text, finish what's due
+today, and correct or delete anything that came out wrong.
 
-Two screens. `Capture` is the launch screen (D9) and `Today` is one tap away.
+Two tabs plus a detail screen. `Capture` is the launch screen (D9), `Today` is
+one tap away, and an item opens from a `Today` row title.
 
 | Screen | Use cases |
 |--------|-----------|
@@ -86,8 +87,9 @@ one place that owns the schema and the state machine.
 
 ## Known edges
 
-- **No offline queue.** A capture that fails to send keeps your text in the box
-  and says so. Queue-and-sync is UC6, phase 3.
+- **No offline queue, and there will not be one.** A capture that fails to send
+  keeps your text in the box (or the recording on the device) and says so.
+  UC6 was dropped on 23 August 2026 — retrying is manual.
 - **`Today` ends at local midnight.** Something due at 00:20 shows up after the
   day rolls over, not before. Firing at the due moment is the push notification's
-  job (UC23, phase 2).
+  job (UC23, session 2).

@@ -75,7 +75,8 @@ transcription, not failed parses. See D22.
 capture is what UC38 edits against and UC34 searches; rewriting it means
 the user can never see what they actually said. `Today` and the review
 deck display `parsed_text` and fall back to `raw_text`. `project_hint` and
-`entities` are still returned-but-not-stored — those need UC11 and UC44.
+`entities` are still returned-but-not-stored. `project_hint` stays that way
+(UC11 dropped); `entities` gets stored by UC45.
 *Revisit if:* the fallback is never exercised, i.e. parse failures are rare
 enough that a null `parsed_text` is dead code.
 

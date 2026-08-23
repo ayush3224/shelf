@@ -9,7 +9,7 @@ under "Sessions", and move anything that changed into the "Current
 state" table above it. Keep the reasoning, not just the outcome — the
 *why* is the part that's expensive to recover.
 
-Last updated: **22 August 2026**
+Last updated: **23 August 2026**
 
 ---
 
@@ -43,7 +43,7 @@ ever set explicitly. The rest move on their own:
 
 | Transition | Trigger |
 |---|---|
-| → `active` | captured with a time, or re-mentioned later |
+| → `active` | captured with a time, or reactivated by hand from the shelf |
 | → `shelved` | captured without a time, or ignored N times |
 | → `dropped` | shelved and untouched for M days |
 | → `done` | one tap or one word — the only manual one |
@@ -51,7 +51,13 @@ ever set explicitly. The rest move on their own:
 The claim being tested is that **silence is signal**. Conventional
 systems treat an ignored item as pending forever, which is what turns
 them into guilt piles. This one reads repeated silence as "not now" and
-acts on it, then says so.
+acts on it.
+
+It used to say so as well. UC22 (announce every automatic transition) was
+dropped on 23 August 2026, so decay is silent and the weekly digest is the
+only place it surfaces. That is a live risk to the whole bet: "acts on it and
+tells you" is defensible, "acts on it quietly" is closer to losing things.
+Worth watching once session 2 ships.
 
 Two supporting decisions:
 
@@ -64,7 +70,18 @@ Two supporting decisions:
 
 44 use cases were enumerated up front (see `use-cases.md`), grouped into
 capture, parsing, state transitions, delivery, review, retrieval,
-system, and integrations. 16 are P0.
+system, and integrations.
+
+That list has since moved. On 23 August 2026 five were **dropped** — UC6
+(offline queue), UC11 (project inference), UC22 (announce transitions), UC29
+(quiet hours), UC35 (natural-language query) — all owner decisions, none
+technical. Two were **deferred** rather than cancelled: UC2 (widget) and UC24
+(full-screen alarm), both pending real usage. UC20 changed shape: reactivation
+is an in-app action on the shelf, not a spoken re-mention. And three were
+**added** as a People module — UC45-47.
+
+Dropped rows are struck through and kept, never deleted. The IDs appear in
+commits and decisions, and reusing one would silently repoint that history.
 
 The full list was written before any code, deliberately — not to build
 it all, but to know what shape the data model needed so later phases
@@ -74,6 +91,10 @@ exist from the first migration despite the graph feature being P2.
 Two additions came later in discovery: writing to a personal Google
 Calendar (UC43, which replaced a read-only mirror), and an
 Obsidian-style people/notes graph (UC44).
+
+UC45-47 are the practical first cut of that graph — the same `entities` and
+`links` tables, without the graph UI. Recall is manual: you look a person up.
+No calendar triggering and no proactive surfacing, both explicitly deferred.
 
 ## 4. Architecture and why
 
@@ -165,29 +186,31 @@ off-site copy is still worth adding.
 
 ## 7. Pending — immediate
 
-1. Commit the app work; `systemctl restart shelf` to deploy the two new
-   routes.
-2. Configure Google sign-in across three places that must agree: Google
-   Cloud Console, the Supabase Google provider, and the redirect
-   allow-list (`shelf://auth-callback`).
-3. `eas build:configure`, then
-   `eas build --profile preview --platform android`.
-4. Install the APK; verify sign-in, a timed capture, and an untimed one.
-5. **Use it for two weeks.** This is a gate, not a formality — Phase 1's
-   exit criterion is real usage, not passing tests.
+1. ✅ ~~Commit the app work; restart the service.~~ Done.
+2. ✅ ~~Configure Google sign-in across Console, Supabase and the redirect
+   allow-list.~~ Done — sign-in works on the device.
+3. ✅ ~~`eas build --profile preview --platform android`, install the APK.~~
+   Done, several times over.
+4. **Rebuild with the FormData fix (D26) and use it.** Voice capture has
+   never completed on the phone; every live verification went through `curl`.
+5. **Use it for two weeks.** This is a gate, not a formality — session 1's
+   exit criterion is real usage, and session 2's decay constants are
+   guesswork until there is behaviour to tune them against.
 
-## 8. Pending — later phases
+## 8. Pending — later sessions
 
-- **Phase 2** — notifications, snooze, the decay engine, shelf browsing,
-  search, quiet hours.
-- **Phase 3** — home-screen widget, full-screen DND-breaking alarm,
-  offline capture queue, audio playback, multi-item splitting.
-- **Phase 4** — the swipe-deck weekly review, digest via the Batch API.
-- **Phase 5** — Google Calendar write (UC43), one-way only.
-- **Phase 6** — the people/notes graph (UC44), project inference,
-  natural-language query.
-- **Phase 7** — lock-screen capture, reminders in a known person's
-  voice, voice-call escalation, export.
+`PLAN.md` holds the detail. In short:
+
+- **Session 2** — push, snooze, auto-shelve, auto-drop, reactivation. The
+  last of the P0 work, and the differentiating part.
+- **Session 3** — the shelf screen: browse, search, filter.
+- **Session 4** — People: UC45-47 on the `entities`/`links` tables.
+- **Session 5** — weekly review deck, digest, Google Calendar write, and the
+  delivery half of the critical flag.
+
+Unscheduled: the widget and full-screen alarm (deferred), plus the P2 tail —
+lock-screen capture, dedup, voice reminders, call escalation, export, and the
+full graph UI.
 
 ## 9. Open questions
 
@@ -206,14 +229,43 @@ resurrected and tune both from evidence.
 ## 10. Known debt
 
 - No off-site backup copy.
-- Committing directly to `main` rather than the per-phase PR flow
-  `CLAUDE.md` describes. Fine for a single-committer repo — the doc
-  should probably be relaxed to match.
-- `parsed_text` is stored but not exposed in `v_items_query`.
+- `parsed_text` is stored but not exposed in `v_items_query` — which is now
+  moot, since UC35 was dropped and nothing reads that view.
+- `QUIET_HOURS` is still in the config module, unused since UC29 was dropped.
+- The two earliest captures are stored as `.mp3` with `audio/mpeg` — real
+  `.m4a` files misnamed before D28. They play; nothing has been migrated.
 - Postgres password was exposed in a chat transcript; rotation
   outstanding.
 - An APK built this way doesn't auto-update — every change means a
   rebuild and reinstall.
+
+## 11. Lessons
+
+Things this project has already paid for. Kept here so they don't have to be
+paid for twice.
+
+- **Inventory what's already running before provisioning anything.** The
+  hosting decision moved three times before `docker ps` revealed a complete
+  Supabase stack that had been running on the box for six weeks (section 5).
+
+- **On this stack, verify what actually runs rather than what the docs
+  describe.** Three separate bugs came from reading the right documentation
+  about the wrong runtime: React Native's `FormData` encoder, when Expo had
+  replaced the global `fetch` with its own (D26); Android's `MimeTypeMap`
+  reporting `audio/mpeg` for an `.m4a`, so real AAC captures stored as `.mp3`
+  (D28); and Jest's standards-compliant `FormData` coercing the file part to
+  `"[object Object]"`, which made the test pass while every capture on the
+  device failed. Expo and React Native both substitute globals underneath you.
+  Read the source, then confirm it is the source that is executing.
+
+- **Calibrate thresholds on real data, not generated data.** The transcription
+  confidence floor was set from `espeak-ng` output — clean, close-miked, no
+  room — and flagged half of the real captures as doubtful while they were
+  word-perfect (D27). Start permissive and tighten against evidence.
+
+- **A failure message that cannot distinguish causes is worse than no
+  message.** `catch {}` reporting "No connection." for every throw sent an
+  entire investigation to the server for a bug that was on the phone.
 
 ---
 
@@ -925,3 +977,73 @@ touches it.
 **Not verified on a phone.** The detail screen, the picker and the
 confirmation dialog have only been type-checked and unit-tested; every
 live check went through `curl`.
+
+### 23 August 2026 — scope reset and doc catch-up
+
+A day of building ended with the docs describing a project that no longer
+existed. This entry is the reconciliation.
+
+**Five use cases dropped**, all owner decisions rather than technical
+blocks: UC6 (offline queue), UC11 (project inference), UC22 (announce
+transitions), UC29 (quiet hours), UC35 (natural-language query). Rows
+struck through and kept — the IDs appear across commits, decisions and
+this log, and reusing one would silently repoint that history at
+something else.
+
+**UC22 is the one that cost something.** "Every automatic transition is
+announced, never silent" was a stated principle in `CLAUDE.md`, not a
+feature row, and dropping it means UC18 and UC19 move items without
+telling anyone. `CLAUDE.md` has been updated rather than left to
+contradict the use-case list, but the tension is worth naming: "reads
+your silence and acts on it, and tells you" is a defensible bet, and
+"acts on it quietly" is closer to losing things. It also promotes UC31,
+the weekly digest, from nicety to the only surface where decay is visible
+at all. Reversing this means reviving UC22 and restoring that line.
+
+Two **deferred, not cancelled**: UC2 (widget) and UC24 (full-screen
+alarm). Both are friction removal, and whether they justify two native
+modules is a question daily use answers and speculation does not.
+
+**UC20 changed shape** — reactivation is now an in-app action on the
+shelf, not a spoken re-mention. Simpler to build and simpler to predict;
+re-mention detection was always going to be UC13's problem.
+
+**A People module was added**: UC45 (voice-record a note about someone,
+the parse extracts who and links it), UC46 (person page), UC47 (browse
+and search people). This is the second thing the system is for, and the
+`entities` and `links` tables have been sitting in migration 001 since
+day one for exactly it (D7) — so it is extraction and UI, not a
+migration. That early call has now paid for itself.
+
+Recall is **manual**: you look someone up. No calendar triggering, no
+proactive surfacing — no "you are meeting Ravi in an hour, here is what
+you said last time". Explicitly deferred, not forgotten: it needs UC43
+and a delivery tier, and it should not be built before the manual version
+has been used enough to know what is worth surfacing.
+
+**`PLAN.md` rewritten as five sessions** rather than eight phases:
+item detail (done), decay and push, shelf screen, People, review and
+calendar. Each keeps an exit criterion. The phase numbering had stopped
+matching how the work actually happened, and a plan nobody follows is
+worse than no plan.
+
+**`CLAUDE.md` relaxed on branching.** It asked for one PR per phase
+milestone; the reality is direct commits to `main`, and that is
+deliberate — one committer, no review to wait for, and a PR that only
+ever merges itself is ceremony. Known debt had been carrying this as an
+open item; it is now a decision instead.
+
+`docs/architecture.md` was carrying a scheduler that announces
+transitions and respects quiet hours, plus a section for the
+natural-language query. All three now describe what will actually be
+built, with the dropped ones struck through rather than deleted.
+
+**Added a Lessons section**, including the one this stack keeps teaching:
+verify what actually runs rather than what the docs describe. Three
+separate bugs came from reading the right documentation about the wrong
+runtime — RN's `FormData` when Expo had replaced `fetch`, Android's
+`MimeTypeMap` calling an `.m4a` an `audio/mpeg`, and Jest's `FormData`
+stringifying the file part so the test passed while the device failed.
+
+No code changed. `PLAN.md`, `CLAUDE.md`, `docs/use-cases.md`,
+`docs/architecture.md` and this file did.

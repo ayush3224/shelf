@@ -148,8 +148,9 @@ is never lost (UC42).
 
 `text` is stored as `items.parsed_text` (migration 002); `raw_text` keeps
 the capture exactly as it arrived. `project_hint` and `entities` are
-returned but **not stored** — project inference is UC11 and entity linking
-is UC44, both phase 6.
+returned but **not stored**. `project_hint` stays that way — UC11 was dropped.
+`entities` gets stored by UC45 in session 4, which is what the `entities` and
+`links` tables have been waiting for since migration 001 (D7).
 
 Relative dates ("tomorrow at 3pm") resolve against `TZ`, not the server
 clock (D15).
