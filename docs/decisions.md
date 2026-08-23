@@ -240,6 +240,40 @@ body is now tested by running it through `convertFormDataAsync` itself.
 *Revisit if:* the app ever sets `EXPO_PUBLIC_USE_RN_FETCH=1`, which restores
 RN's fetch and inverts this — then the RN shape becomes the correct one.
 
+**D27 — The confidence floor is 0.5, calibrated on real recordings.**
+The 0.75 floor was set from synthetic speech — clean, close-miked, no room.
+Real captures from a phone land at **0.70-0.76 while being word-perfect**, so
+half of them were arriving flagged `needs_review` for no reason, which makes
+the flag noise and teaches the user to ignore it.
+0.5 keeps the signal for what `needs_review` is actually for — mumbling,
+distance, a clipped recording — without penalising ordinary conditions.
+*Lesson worth keeping:* a threshold calibrated on generated audio is
+calibrated on the wrong distribution. This one should have started permissive
+and tightened against real data, not the reverse.
+*Revisit if:* genuinely bad captures start landing above 0.5, or the recording
+setup changes.
+
+**D28 — The stored format comes from the file's bytes, not its labels.**
+Real captures were being stored as `.mp3` with `audio/mpeg`. They were not
+MP3s: the bytes are `ftyp`/`mp42`, i.e. AAC in an MPEG-4 container, exactly
+what the recorder writes. Android's `MimeTypeMap` maps the `m4a` extension to
+`audio/mpeg` (AOSP lists `m4a` under that type), `expo-file-system` derives
+`File.type` from that lookup, and `extension_for` trusted the declared type
+over the filename. The bucket allows `audio/mpeg`, so nothing errored — the
+file just lied about itself from then on.
+Resolution order is now: **the bytes, then the filename, then the declared
+content type.** The container is not a matter of opinion, so it is read rather
+than asked about; the filename is next because whoever wrote the file knew
+what they wrote; the declared type is last precisely because it is the one
+that was wrong.
+*Why it mattered even though nothing broke:* playback served `audio/mpeg` for
+an MP4, and Groq received a `.mp3` filename for AAC. Both worked only because
+ExoPlayer and ffmpeg sniff content rather than trusting labels — the same
+thing the server now does, instead of relying on everyone downstream to
+compensate.
+*Revisit if:* a format arrives that the sniffer does not recognise; it returns
+None rather than guessing, and the filename still carries it.
+
 ---
 
 ## Open

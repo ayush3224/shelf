@@ -96,15 +96,21 @@ def test_decode_rejects_a_reply_without_words(payload):
 
 
 def test_low_confidence_is_relative_to_the_floor(monkeypatch):
-    monkeypatch.setattr(settings, "transcript_confidence_floor", 0.75)
-    assert Transcript("x", 0.6, "cloud").low_confidence is True
-    assert Transcript("x", 0.9, "cloud").low_confidence is False
+    monkeypatch.setattr(settings, "transcript_confidence_floor", 0.5)
+    assert Transcript("x", 0.4, "cloud").low_confidence is True
+    assert Transcript("x", 0.6, "cloud").low_confidence is False
 
 
-def test_the_floor_is_set_for_a_single_known_language():
-    """D23 raised this with the language pin. If the language is ever cleared
-    this has to come back down, or every non-English capture gets flagged."""
-    assert settings.transcript_confidence_floor == 0.75
+@pytest.mark.parametrize("score", [0.699915, 0.70, 0.7556, 0.76])
+def test_real_recordings_are_not_flagged(score):
+    """Measured from actual captures, whose transcripts were word-perfect at
+    these scores. The 0.75 floor they were first judged against came from
+    synthetic audio and flagged half of them (D27)."""
+    assert Transcript("x", score, "cloud").low_confidence is False
+
+
+def test_the_floor_is_calibrated_on_real_audio():
+    assert settings.transcript_confidence_floor == 0.5
 
 
 def test_missing_confidence_is_not_low_confidence():

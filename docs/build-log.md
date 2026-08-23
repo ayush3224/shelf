@@ -155,7 +155,7 @@ off-site copy is still worth adding.
 | Cloud transcription (UC8) | ✅ verified live — Groq turbo, 1.6s round trip |
 | Multi-item splitting (UC4) | ⚠️ built, never run against real Haiku |
 | Mobile test suite (jest-expo) | ✅ 61 tests |
-| Backend test suite | ✅ 164 tests |
+| Backend test suite | ✅ 184 tests |
 | Native dep tree vs SDK 57 matrix | ✅ reconciled, `expo-doctor` 21/21 |
 | Google OAuth redirect handling | ✅ callback swallowed, not routed |
 | Google OAuth config | ❌ not started |
@@ -805,3 +805,57 @@ the real implementation.
 
 61 mobile tests, 164 backend, lint and typecheck clean. Not yet re-run on
 a phone.
+
+### 23 August 2026 — a threshold tuned on the wrong audio, and a file that lied
+
+**The floor was calibrated on synthetic speech.** 0.75 came from
+`espeak-ng` output: clean, close-miked, no room. Real captures land at
+0.70-0.76 *while being word-perfect* — both of the user's live captures
+were correct English and one was flagged `needs_review` at 0.6999. A flag
+that fires on half the good captures is noise, and noise teaches you to
+ignore the flag. Lowered to 0.5 (D27).
+
+The lesson is the one worth keeping: a threshold calibrated on generated
+audio is calibrated on the wrong distribution. It should have started
+permissive and tightened against real data.
+
+**The `.mp3` files are not MP3s.** Downloaded one and looked:
+
+```
+first bytes : 00 00 00 18 66 74 79 70 6d 70 34 32   ....ftypmp42
+ffprobe     : aac, 44100 Hz, stereo, mov/mp4/m4a
+file(1)     : ISO Media, MP4 v2 [ISO 14496-14]
+```
+
+AAC in an MPEG-4 container — exactly what the recorder writes. A misnamed
+file, not a format change.
+
+The chain: Android's `MimeTypeMap` maps the `m4a` extension to
+`audio/mpeg` (AOSP lists `m4a` under that type), `expo-file-system`
+derives `File.type` from that lookup (`JavaFile.kt:57`), Expo's encoder
+puts it on the part, and `extension_for` trusted the declared type ahead
+of the filename — mapping `audio/mpeg` to `.mp3`. The filename was
+`recording-<uuid>.m4a` and correct the whole time; the server threw it
+away in favour of a label the platform got wrong.
+
+**Is it consistent with what the bucket accepts?** Yes, and that is the
+problem. `audio/mpeg` is on the allow-list, so the upload succeeded and
+nothing errored. Playback then served `audio/mpeg` for an MP4, and Groq
+received a `.mp3` filename for AAC. Both worked — but only because
+ExoPlayer and ffmpeg sniff content rather than trusting labels. The
+system was relying on everyone downstream to compensate for a claim it
+had made up itself.
+
+**Fixed by sniffing** (D28). Resolution order is now the bytes, then the
+filename, then the declared content type: the container is not a matter
+of opinion, so it is read rather than asked about. Verified against the
+actual bytes pulled out of the bucket — `audio/mpeg` + `recording-abc.m4a`
+now resolves to `.m4a` / `audio/mp4`, and a genuine MP3 still resolves to
+`.mp3`, so the precedence has not just become "always m4a".
+
+184 backend tests (20 new), lint clean.
+
+**Left alone:** the two existing objects are still named `.mp3` with
+`audio/mpeg`. They play and they transcribed fine; renaming them means
+moving storage objects and rewriting `audio_path`, which is the user's
+data and their call. New captures will be correct.

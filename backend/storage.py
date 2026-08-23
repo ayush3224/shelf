@@ -70,6 +70,51 @@ EXTENSION_CONTENT_TYPES = {
 MAX_AUDIO_BYTES = 10 * 1024 * 1024
 
 
+def sniff_extension(data: bytes) -> Optional[str]:
+    """Identify an audio format from its leading bytes.
+
+    Preferred over both labels a client sends, because both have been observed
+    lying. Android derives a file's MIME from `MimeTypeMap`, whose table maps
+    `m4a` to `audio/mpeg` — so a perfectly good AAC recording arrives declaring
+    itself an MP3, and trusting that stored it under `.mp3` with an
+    `audio/mpeg` content type. The bucket accepts `audio/mpeg`, so nothing
+    errored; the file simply lied about itself from then on.
+
+    The container is not a matter of opinion, so it is read rather than asked
+    about.
+
+    Args:
+        data: At least the first 16 bytes of the file.
+
+    Returns:
+        An extension including the leading dot, or None if unrecognised.
+    """
+    if len(data) < 12:
+        return None
+
+    # ISO base media: a `ftyp` box at offset 4. Covers .m4a, .mp4 and .3gp,
+    # all of which the recorder can produce as an MPEG-4 container.
+    if data[4:8] == b"ftyp":
+        return ".m4a"
+    if data[0:4] == b"RIFF" and data[8:12] == b"WAVE":
+        return ".wav"
+    if data[0:4] == b"OggS":
+        return ".ogg"
+    # EBML, i.e. WebM or Matroska.
+    if data[0:4] == b"\x1a\x45\xdf\xa3":
+        return ".webm"
+    if data[0:3] == b"ID3":
+        return ".mp3"
+    # A bare MPEG audio frame: 11 sync bits.
+    if data[0] == 0xFF and (data[1] & 0xE0) == 0xE0:
+        return ".mp3"
+    # ADTS AAC shares the 0xFF sync, so it is checked after and only on the
+    # narrower pattern.
+    if data[0] == 0xFF and (data[1] & 0xF6) == 0xF0:
+        return ".aac"
+    return None
+
+
 class StorageError(Exception):
     """The object store refused or could not be reached."""
 
@@ -98,35 +143,58 @@ def _configured() -> tuple[str, str]:
     return base, key
 
 
-def extension_for(content_type: str, filename: Optional[str] = None) -> str:
+def extension_for(
+    content_type: str,
+    filename: Optional[str] = None,
+    data: Optional[bytes] = None,
+) -> str:
     """File extension to store a recording under.
+
+    Resolved in order of how much each source can be trusted:
+
+    1. **The bytes.** The container is not a matter of opinion.
+    2. **The filename.** Written by whoever produced the file, so it knows what
+       it wrote.
+    3. **The declared content type.** Last, because on Android it is a
+       `MimeTypeMap` lookup that returns `audio/mpeg` for `.m4a` — the label
+       that had real AAC captures stored as `.mp3`.
 
     Args:
         content_type: MIME type the client declared.
-        filename: Original filename, used only as a fallback.
+        filename: Original filename.
+        data: Leading bytes of the file, if available.
 
     Returns:
         An extension including the leading dot.
 
     Raises:
-        StorageError: If the content type is not an accepted audio type.
+        StorageError: If the format is not one that can be stored.
     """
-    normalised = (content_type or "").split(";")[0].strip().lower()
-    if normalised in ALLOWED_CONTENT_TYPES:
-        return ALLOWED_CONTENT_TYPES[normalised]
+    if data:
+        sniffed = sniff_extension(data)
+        if sniffed:
+            return sniffed
 
-    # Some clients send application/octet-stream and let the name carry the
-    # format, so the filename is the fallback — but only for formats that can
-    # actually be stored.
     if filename and "." in filename:
         suffix = "." + filename.rsplit(".", 1)[1].lower()
         if suffix in EXTENSION_CONTENT_TYPES:
             return suffix
 
-    raise StorageError(f"Unsupported audio type: {content_type!r}")
+    normalised = (content_type or "").split(";")[0].strip().lower()
+    if normalised in ALLOWED_CONTENT_TYPES:
+        return ALLOWED_CONTENT_TYPES[normalised]
+
+    raise StorageError(
+        f"Unsupported audio type: {content_type!r}"
+        + (f" (filename {filename!r})" if filename else "")
+    )
 
 
-def canonical_content_type(content_type: str, filename: Optional[str] = None) -> str:
+def canonical_content_type(
+    content_type: str,
+    filename: Optional[str] = None,
+    data: Optional[bytes] = None,
+) -> str:
     """The MIME type an upload should declare.
 
     Derived from the resolved extension rather than echoed back, so that a
@@ -135,7 +203,8 @@ def canonical_content_type(content_type: str, filename: Optional[str] = None) ->
 
     Args:
         content_type: MIME type the client declared.
-        filename: Original filename, used only to recover an extension.
+        filename: Original filename.
+        data: Leading bytes of the file, if available.
 
     Returns:
         The standard MIME type for the resolved format.
@@ -143,10 +212,15 @@ def canonical_content_type(content_type: str, filename: Optional[str] = None) ->
     Raises:
         StorageError: If the format is not one that can be stored.
     """
-    return EXTENSION_CONTENT_TYPES[extension_for(content_type, filename)]
+    return EXTENSION_CONTENT_TYPES[extension_for(content_type, filename, data)]
 
 
-def audio_key(user_id: str, content_type: str, filename: Optional[str] = None) -> str:
+def audio_key(
+    user_id: str,
+    content_type: str,
+    filename: Optional[str] = None,
+    data: Optional[bytes] = None,
+) -> str:
     """Build the storage key for one recording.
 
     Partitioned by user and month so the bucket stays listable by hand, and
@@ -164,7 +238,7 @@ def audio_key(user_id: str, content_type: str, filename: Optional[str] = None) -
     stamp = datetime.now(timezone.utc)
     return (
         f"{user_id}/{stamp:%Y/%m}/{stamp:%Y%m%dT%H%M%S}-{uuid4().hex[:8]}"
-        f"{extension_for(content_type, filename)}"
+        f"{extension_for(content_type, filename, data)}"
     )
 
 
@@ -198,8 +272,8 @@ async def upload_audio(
         )
 
     base, key = _configured()
-    path = audio_key(user_id, content_type, filename)
-    stored_type = canonical_content_type(content_type, filename)
+    path = audio_key(user_id, content_type, filename, data)
+    stored_type = canonical_content_type(content_type, filename, data)
     bucket = settings.supabase_storage_bucket
 
     try:

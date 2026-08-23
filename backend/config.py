@@ -62,10 +62,10 @@ class Settings(BaseSettings):
     # model that removes its language-detection guess as a failure mode.
     groq_language: str = "en"
     # Below this, the transcript is kept but the row is flagged needs_review.
-    # Set for a known single language: on clean English Whisper sits well above
-    # this, so a score under it now means bad audio rather than a language the
-    # model was not expecting (D23).
-    transcript_confidence_floor: float = 0.75
+    # Calibrated against real recordings, which land 0.70-0.76 even when the
+    # transcript is word-perfect — a phone mic in a room is not the clean
+    # synthetic audio the first value was set from (D27).
+    transcript_confidence_floor: float = 0.5
 
     model_config = {
         "env_file": ".env",

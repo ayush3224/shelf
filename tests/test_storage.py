@@ -19,8 +19,14 @@ from backend.storage import (
     delete_audio,
     extension_for,
     signed_url,
+    sniff_extension,
     upload_audio,
 )
+
+# The first bytes of a real capture off the phone: an `ftyp` box declaring
+# `mp42`, i.e. AAC in an MPEG-4 container. The device declared this
+# `audio/mpeg`, which is what stored it as `.mp3`.
+REAL_M4A = bytes.fromhex("00000018667479706d70343200000000") + b"\x00" * 48
 
 USER = "ff2da522-413b-471e-aef1-8d5c614a52b4"
 
@@ -75,6 +81,76 @@ def stub_http(monkeypatch):
 )
 def test_known_audio_types_map_to_an_extension(content_type, expected):
     assert extension_for(content_type) == expected
+
+
+# ---------------------------------------------------------------- sniffing
+
+
+def test_a_real_capture_is_recognised_as_m4a():
+    """The bytes the phone actually sent. Android reported them as
+    `audio/mpeg`; the container says otherwise and the container is right."""
+    assert sniff_extension(REAL_M4A) == ".m4a"
+
+
+@pytest.mark.parametrize(
+    "data,expected",
+    [
+        (b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 16, ".m4a"),
+        (b"\x00\x00\x00\x20ftypM4A " + b"\x00" * 16, ".m4a"),
+        (b"RIFF\x24\x08\x00\x00WAVEfmt ", ".wav"),
+        (b"OggS\x00\x02\x00\x00\x00\x00\x00\x00", ".ogg"),
+        (b"\x1a\x45\xdf\xa3\x01\x00\x00\x00\x00\x00\x00\x1f", ".webm"),
+        (b"ID3\x04\x00\x00\x00\x00\x00\x00\x00\x00", ".mp3"),
+        (b"\xff\xfb\x90\x00" + b"\x00" * 12, ".mp3"),
+    ],
+)
+def test_known_containers_are_identified(data, expected):
+    assert sniff_extension(data) == expected
+
+
+@pytest.mark.parametrize("data", [b"", b"short", b"not audio at all!!!!"])
+def test_unrecognised_bytes_return_none(data):
+    """None means "no opinion", so the caller falls back to the labels."""
+    assert sniff_extension(data) is None
+
+
+# --------------------------------------------------- resolution precedence
+
+
+def test_the_bytes_beat_a_wrong_content_type():
+    """The bug this fixes: Android's MimeTypeMap maps `m4a` to `audio/mpeg`,
+    so a real AAC capture arrived claiming to be an MP3 and was stored as
+    `.mp3` under `audio/mpeg` — which the bucket accepts, so nothing errored."""
+    assert extension_for("audio/mpeg", "recording-abc.m4a", REAL_M4A) == ".m4a"
+    assert canonical_content_type("audio/mpeg", "recording-abc.m4a", REAL_M4A) == (
+        "audio/mp4"
+    )
+
+
+def test_the_filename_beats_a_wrong_content_type_when_there_are_no_bytes():
+    """Belt and braces: the filename is written by whoever made the file."""
+    assert extension_for("audio/mpeg", "recording-abc.m4a") == ".m4a"
+
+
+def test_a_genuine_mp3_is_still_stored_as_one():
+    """Precedence must not turn into "always m4a"."""
+    mp3 = b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\x00" * 8
+    assert extension_for("audio/mpeg", "voice.mp3", mp3) == ".mp3"
+    assert canonical_content_type("audio/mpeg", "voice.mp3", mp3) == "audio/mpeg"
+
+
+def test_the_content_type_is_still_the_last_resort():
+    assert extension_for("audio/wav", "blob", b"unrecognised bytes!!") == ".wav"
+
+
+async def test_upload_stores_a_real_capture_as_m4a(stub_http):
+    """End to end through upload_audio, with the phone's own labels."""
+    seen = stub_http("post")
+    stored = await upload_audio(USER, REAL_M4A, "audio/mpeg", "recording-abc.m4a")
+
+    assert stored.path.endswith(".m4a")
+    assert stored.content_type == "audio/mp4"
+    assert seen["headers"]["Content-Type"] == "audio/mp4"
 
 
 # ------------------------------------------------------- canonical MIME types

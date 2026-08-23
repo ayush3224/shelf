@@ -291,7 +291,7 @@ def test_orphaned_audio_is_cleaned_up_when_the_row_will_not_write(
 
 def test_a_low_confidence_transcript_is_flagged_not_dropped(client, db, stub_pipeline):
     """D13 reserved `needs_review` for exactly this and never had a use."""
-    stub_pipeline(transcript=Transcript("kal bank jaana hai", 0.2, "cloud"))
+    stub_pipeline(transcript=Transcript("mumbled and distant", 0.2, "cloud"))
     response = post(client)
 
     assert response.json()["parse_status"] == "needs_review"

@@ -109,7 +109,7 @@ QUIET_HOURS          = (22, 7)
 MAX_PARSE_TOKENS     = 200
 MAX_SPLIT_TOKENS     = 600   # UC4 — the array re-prompt only (D19)
 MAX_SPLIT_ITEMS      = 10
-TRANSCRIPT_CONFIDENCE_FLOOR = 0.55  # below this → needs_review (D22)
+TRANSCRIPT_CONFIDENCE_FLOOR = 0.5   # below this → needs_review (D22, D27)
 DIGEST_DAY           = "sunday"
 ```
 
