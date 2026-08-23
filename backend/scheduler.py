@@ -31,7 +31,8 @@ loudly, in the log.
 
 import asyncio
 import logging
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 
@@ -48,6 +49,39 @@ _MAX_TITLE_CHARS = 90
 
 
 @dataclass
+class Survey:
+    """What the tick was looking at before it did anything.
+
+    The counts that say *why* a tick was quiet. "Nothing happened" and
+    "something should have happened and did not" produce identical output
+    without these, and telling them apart after the fact is the difference
+    between reading one log line and re-deriving the state of the database by
+    hand.
+
+    Taken before the sweeps run, so the numbers describe the work the tick was
+    about to consider rather than what survived it.
+    """
+
+    active: int = 0
+    due_now: int = 0
+    shelved: int = 0
+    shelved_expired: int = 0
+    open_pushes: int = 0
+    open_pushes_overdue: int = 0
+    queued_pushes: int = 0
+    devices: int = 0
+
+    def summary(self) -> str:
+        """The considered half of the log line."""
+        return (
+            f"active={self.active} due={self.due_now} "
+            f"shelved={self.shelved}/{self.shelved_expired}expired "
+            f"open={self.open_pushes}/{self.open_pushes_overdue}overdue "
+            f"queued={self.queued_pushes} devices={self.devices}"
+        )
+
+
+@dataclass
 class TickResult:
     """What one tick did. Counts, so the log line is greppable."""
 
@@ -59,6 +93,8 @@ class TickResult:
     sent: int = 0
     failed: int = 0
     stalled: int = 0
+    survey: Survey = field(default_factory=Survey)
+    elapsed_ms: int = 0
 
     @property
     def quiet(self) -> bool:
@@ -75,17 +111,75 @@ class TickResult:
             )
         )
 
+    @property
+    def undeliverable(self) -> bool:
+        """Pushes waiting with nowhere to send them.
+
+        Not an error — the scheduler leaves them queued on purpose rather than
+        burning their attempts (D32) — but it is the one quiet state that looks
+        exactly like a broken tick from the outside.
+        """
+        return self.survey.queued_pushes > 0 and self.survey.devices == 0
+
     def summary(self) -> str:
         """One line for the log."""
         return (
-            f"ignored={self.ignored} shelved={self.shelved} "
+            f"considered[{self.survey.summary()}] "
+            f"did[ignored={self.ignored} shelved={self.shelved} "
             f"dropped={self.dropped} cancelled={self.cancelled} "
             f"queued={self.queued} sent={self.sent} "
-            f"failed={self.failed} stalled={self.stalled}"
+            f"failed={self.failed} stalled={self.stalled}] "
+            f"{self.elapsed_ms}ms"
         )
 
 
 # --------------------------------------------------------------- the steps
+
+
+async def _survey(db: Database) -> Survey:
+    """Count what the tick is about to look at.
+
+    One query, run before the sweeps. It exists so a quiet tick can say *why*
+    it was quiet: no items due is a different fact from items due with no
+    device to send to, and both used to print the same nothing.
+
+    Args:
+        db: Database.
+
+    Returns:
+        The counts, as of now.
+    """
+    async with db.connection() as conn:
+        result = await conn.execute(
+            f"""
+            SELECT
+              (SELECT count(*) FROM {settings.db_schema}.items
+                WHERE state = 'active') AS active,
+              (SELECT count(*) FROM {settings.db_schema}.items
+                WHERE state = 'active' AND due_at IS NOT NULL
+                  AND due_at <= now()) AS due_now,
+              (SELECT count(*) FROM {settings.db_schema}.items
+                WHERE state = 'shelved') AS shelved,
+              (SELECT count(*) FROM {settings.db_schema}.items
+                WHERE state = 'shelved'
+                  AND greatest(state_changed_at, updated_at)
+                      < now() - make_interval(days => %(days)s)) AS shelved_expired,
+              (SELECT count(*) FROM {settings.db_schema}.notifications
+                WHERE sent_at IS NOT NULL AND responded_at IS NULL) AS open_pushes,
+              (SELECT count(*) FROM {settings.db_schema}.notifications
+                WHERE sent_at IS NOT NULL AND responded_at IS NULL
+                  AND sent_at <= now()
+                      - make_interval(mins => %(repeat)s)) AS open_pushes_overdue,
+              (SELECT count(*) FROM {settings.db_schema}.notifications
+                WHERE sent_at IS NULL AND responded_at IS NULL) AS queued_pushes,
+              (SELECT count(*) FROM {settings.db_schema}.push_tokens
+                WHERE disabled_at IS NULL) AS devices
+            """,
+            {"days": settings.drop_after_days, "repeat": settings.push_repeat_minutes},
+        )
+        columns = [c.name for c in result.description or []]
+        row = await result.fetchone()
+        return Survey(**dict(zip(columns, row))) if row else Survey()
 
 
 async def _sweep_ignored(db: Database) -> int:
@@ -604,15 +698,28 @@ async def tick(db: Optional[Database] = None) -> TickResult:
         Counts of what each step did.
     """
     db = db or get_db()
+    started = time.monotonic()
     result = TickResult()
 
-    result.ignored = await _sweep_ignored(db)
-    result.shelved = await _sweep_decay(db)
-    result.dropped = await _sweep_expiry(db)
-    result.cancelled = await _cancel_stale(db)
-    result.queued = await _enqueue_due(db)
+    result.survey = await _survey(db)
+    logger.debug("survey: %s", result.survey.summary())
+
+    for name, step in (
+        ("ignored", _sweep_ignored),
+        ("shelved", _sweep_decay),
+        ("dropped", _sweep_expiry),
+        ("cancelled", _cancel_stale),
+        ("queued", _enqueue_due),
+    ):
+        count = await step(db)
+        setattr(result, name, count)
+        logger.debug("step %s: %s", name, count)
+
     result.sent, result.failed = await _send_queued(db)
+    logger.debug("step send: sent=%s failed=%s", result.sent, result.failed)
+
     result.stalled = await _count_stalled(db)
+    result.elapsed_ms = int((time.monotonic() - started) * 1000)
 
     return result
 
@@ -633,27 +740,49 @@ async def run_once() -> TickResult:
     finally:
         await close_db()
 
+    # Every tick logs, including the quiet ones. Silence used to mean either
+    # "nothing to do" or "it died before it got anywhere", and those two
+    # readings cost twenty minutes to tell apart once. A line a minute is
+    # nothing to journald and it is the difference between reading the log and
+    # reconstructing the database by hand.
+    logger.info("tick: %s", result.summary())
+
     if result.stalled:
         logger.error(
             "%s queued pushes have exhausted their attempts and will not be "
             "delivered; nothing will decay from them",
             result.stalled,
         )
-    # A quiet tick is the normal case and runs every minute, so it says
-    # nothing. Anything that moved is worth a line.
-    if not result.quiet:
-        logger.info("tick: %s", result.summary())
+    if result.undeliverable:
+        logger.warning(
+            "%s push(es) queued with no registered device; leaving them queued "
+            "rather than spending their attempts. Open the app to register one",
+            result.survey.queued_pushes,
+        )
 
     return result
 
 
 def main() -> None:
-    """Entry point for the cron tick."""
+    """Entry point for the cron tick.
+
+    Anything that escapes is logged with its traceback and exits non-zero, so
+    a broken tick shows up twice: as a stack trace in `journalctl -u
+    shelf-tick`, and as a failed unit in `systemctl status`. Letting it
+    propagate bare would still print, but a tick that ran and did nothing and
+    a tick that died have to be distinguishable at a glance.
+
+    Set `DEBUG=1` for a line per step.
+    """
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG if settings.debug else logging.INFO,
         format="%(levelname)s %(name)s %(message)s",
     )
-    asyncio.run(run_once())
+    try:
+        asyncio.run(run_once())
+    except Exception:
+        logger.exception("tick failed")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
