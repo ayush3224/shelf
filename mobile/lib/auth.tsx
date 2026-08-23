@@ -26,7 +26,30 @@ type AuthState = {
 
 const AuthContext = createContext<AuthState | null>(null);
 
-const redirectTo = makeRedirectUri({ scheme: APP_SCHEME, path: 'auth-callback' });
+/**
+ * Path segment the OAuth redirect comes back on.
+ *
+ * Deliberately not a route — see `app/+native-intent.tsx` for why.
+ */
+export const AUTH_CALLBACK_PATH = 'auth-callback';
+
+const redirectTo = makeRedirectUri({ scheme: APP_SCHEME, path: AUTH_CALLBACK_PATH });
+
+/**
+ * Does this deep link carry the OAuth redirect?
+ *
+ * The shape depends on the build: `shelf://auth-callback` in a development or
+ * standalone build, `shelf:///auth-callback` when triple-slashed, and
+ * `exp://127.0.0.1:8081/--/auth-callback` under Expo Go. Comparing against
+ * `redirectTo` would only match whichever one this build happens to produce,
+ * so match on the last path segment instead.
+ */
+export function isAuthCallbackUrl(url: string): boolean {
+  const withoutQuery = url.split(/[?#]/)[0];
+  const withoutScheme = withoutQuery.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:/, '');
+  const segments = withoutScheme.split('/').filter((s) => s.length > 0 && s !== '--');
+  return segments[segments.length - 1] === AUTH_CALLBACK_PATH;
+}
 
 function message(e: unknown, fallback: string): string {
   return e instanceof Error && e.message ? e.message : fallback;
@@ -35,12 +58,16 @@ function message(e: unknown, fallback: string): string {
 /**
  * Turn the URL the browser handed back into a session.
  *
+ * Exported because there are two callers: the normal one below, and the
+ * cold-start path in `app/+native-intent.tsx` where the process that opened
+ * the browser no longer exists.
+ *
  * PKCE returns `?code=`; a project still configured for the implicit flow
  * returns the tokens in the fragment. Both are handled because which one you
  * get is a server-side setting, and failing on the other is a confusing
  * "sign-in did nothing" rather than an error.
  */
-async function sessionFromRedirect(url: string): Promise<void> {
+export async function completeAuthRedirect(url: string): Promise<void> {
   const parsed = new URL(url);
 
   const errorDescription =
@@ -117,7 +144,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             throw new Error('The sign-in window closed unexpectedly.');
           }
 
-          await sessionFromRedirect(result.url);
+          await completeAuthRedirect(result.url);
         } catch (e) {
           setError(message(e, 'Sign-in failed.'));
         } finally {

@@ -1,0 +1,34 @@
+{
+  "cli": {
+    "version": ">= 22.2.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_API_BASE_URL": "https://srv1531684.hstgr.cloud/api",
+        "EXPO_PUBLIC_SUPABASE_URL": "https://srv1531684.hstgr.cloud:8443",
+        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlIiwiaWF0IjoxNzUxNTAwMDAwLCJleHAiOjIwNjcwMDAwMDB9.UkDQ2i_xSfIJ7uIuFv5wQ9i-rrIBipTLDtGvKEuVWi0"
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_API_BASE_URL": "https://srv1531684.hstgr.cloud/api",
+        "EXPO_PUBLIC_SUPABASE_URL": "https://srv1531684.hstgr.cloud:8443",
+        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlIiwiaWF0IjoxNzUxNTAwMDAwLCJleHAiOjIwNjcwMDAwMDB9.UkDQ2i_xSfIJ7uIuFv5wQ9i-rrIBipTLDtGvKEuVWi0"
+      }
+    },
+    "production": {
+      "autoIncrement": true
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}

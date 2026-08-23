@@ -150,6 +150,8 @@ off-site copy is still worth adding.
 | Timezone handling (IST) | ✅ tested — "tomorrow 3pm" → 09:30Z |
 | `GET /items/today`, `POST /items/{id}/done` | ⚠️ built, needs service restart |
 | Expo app: capture, today, sign-in | ⚠️ built, never run on a phone |
+| Native dep tree vs SDK 57 matrix | ✅ reconciled, `expo-doctor` 21/21 |
+| Google OAuth redirect handling | ✅ callback swallowed, not routed |
 | Google OAuth config | ❌ not started |
 | APK on the phone | ❌ not started |
 | Everything Phase 2+ | ❌ not started |
@@ -236,3 +238,114 @@ chunked across secure-store keys because a Supabase session with two
 JWTs exceeds the platform's ~2KB per-value limit.
 
 **Ended:** backend live and healthy, app built but not yet on a phone.
+
+### 23 August 2026 — EAS native dependency reconciliation
+
+EAS builds were failing on what looked like an unsatisfiable native
+version triangle: RN 0.86.2 → reanimated ≥4.6 → worklets ≥0.12, against
+expo-modules-core 57.0.12 which caps worklets at 0.10.
+
+The middle link was false. React Native declares no dependency or peer
+on reanimated at all — the arrow runs the other way. Reanimated 4.6.0
+declares `react-native: "0.83 - 0.87"`; it *supports* 0.86, it is not
+*required by* it. 4.6.0 is also the first release to move to
+`worklets 0.12.x`, targeting the next SDK. Reanimated 4.5.1 — the SDK 57
+pin — declares `0.83 - 0.86` and `worklets 0.10.x`, satisfying RN 0.86.2
+and expo-modules-core's `^0.10.0` ceiling at once. The triangle was only
+unsatisfiable because 4.6.0 was in it.
+
+`expo-modules-core@57.0.12` was never the problem: it is not a direct
+dependency, it is pinned exactly by `expo@57.0.15`, and its worklets
+range is the SDK 57 native ABI boundary doing its job.
+
+Nothing in `app/` or `lib/` imports reanimated or gesture-handler. They
+cannot be dropped, though — `react-native-drawer-layout@4.2.10`, pulled
+by `expo-router`, hard-depends on both.
+
+Two real drift points, neither where the reported conflict pointed:
+
+- reanimated declared `4.1.2` against an SDK pin of `4.5.1`. Its peers
+  are loose (`react-native: "*"`, `worklets: ">=0.5.0"`) so npm resolved
+  it happily against worklets 0.10.4 — a pairing Expo never builds. The
+  reanimated↔worklets boundary is native C++; the loose semver range
+  does not actually protect it. Installs clean, fails at link time.
+- gesture-handler 3.2.1 sat in `node_modules` while absent from
+  `package.json` — npm auto-installed it as an optional peer of
+  `expo-router` (`*`), so it floated to latest, a major version past the
+  `~2.32.0` pin. Same for worklets at 0.10.4 vs 0.10.1.
+
+The floating-peer case is the one worth remembering: `expo install
+--check` reads `package.json`, so it flagged only reanimated and stayed
+silent on both undeclared packages. Auto-installed peers are invisible
+to the official check and re-drift on every `npm install`.
+
+Fix: pinned reanimated to 4.5.1, declared gesture-handler `~2.32.0` and
+worklets `0.10.1` explicitly, dropped an empty `overrides: {}` left over
+from earlier attempts, and reinstalled from a deleted lockfile.
+
+**Verified:** `npm ls` clean with every package deduped to one copy,
+`expo install --check` up to date, `tsc --noEmit` clean, `expo-doctor`
+21/21. Not yet through an actual EAS build.
+
+### 23 August 2026 — the OAuth redirect was never a route
+
+Google sign-in completed and the app landed on expo-router's "Unmatched
+route". The framing was either/or — is `openAuthSessionAsync` failing to
+intercept the redirect, or is Android also delivering it to the router?
+It is neither, because on Android there is no interception to fail.
+
+`expo-web-browser` has no native auth-session implementation on Android:
+`_authSessionIsNativelySupported()` is literally `Platform.OS !==
+'android'`. It falls back to a polyfill whose entire redirect mechanism
+is `Linking.addEventListener('url', ...)`. `expo-router` subscribes to
+that same event in `build/link/linking.js`. The redirect arrives as an
+ordinary Android intent on the `shelf` scheme and *both* subscribers see
+it — no consumption, no priority, no interception anywhere.
+
+So both things happen at once. The exchange runs and succeeds, and the
+router independently tries to navigate to `/auth-callback`, finds no
+route, and paints "Unmatched route" over a sign-in that worked.
+
+Fixed with `app/+native-intent.tsx`, whose `redirectSystemPath` returns
+`null` for the callback URL — expo-router documents a falsy return as
+"stay on the current path". Chose that over adding an
+`app/auth-callback.tsx` route for two reasons. First, a route would be a
+second exchange racing the one in `signInWithGoogle` for a single-use
+code; `_exchangeCodeForSession` calls `removePKCEVerifier` on success, so
+the loser fails with a missing-verifier error and reports a working
+sign-in as broken. Verified: the second exchange of the same code
+rejects. Second, nothing needs to navigate to `(tabs)` by hand —
+`_saveSession` fires `SIGNED_IN`, which flips the `Stack.Protected`
+guards in `_layout.tsx`. A route would duplicate the exchange and fight
+the guard to render a screen no one ever sees.
+
+Cold start needed handling too, and is the one case the old code could
+not have survived: if Android kills the process behind the Custom Tab,
+the `openAuthSessionAsync` promise and its listener die with it and the
+redirect arrives as the app's *initial* URL. The verifier is in the
+keystore, so `redirectSystemPath` does the exchange itself when
+`initial` is true — bounded at 15s, because expo-router awaits this
+before rendering and RN's `fetch` has no timeout of its own.
+
+`isAuthCallbackUrl` matches on the last path segment rather than against
+`redirectTo`, because the redirect shape varies by build
+(`shelf://auth-callback`, `shelf:///auth-callback`,
+`exp://127.0.0.1:8081/--/auth-callback`). Worth knowing: for a custom
+scheme the WHATWG parser puts `auth-callback` in `host`, leaving
+`pathname` empty — a pathname-based match silently matches nothing.
+
+**Verified** without a device, by running the real `@supabase/auth-js`
+and the real chunked keystore adapter with only `expo-secure-store` and
+`fetch` faked: the verifier is written and read back through the chunked
+adapter, the exchange POSTs the code from the redirect URL with that
+verifier, `getSession()` returns the session afterwards, and a realistic
+Google session (2590B) round-trips across 2 chunks — over the ~2KB
+keystore limit, so the chunking is genuinely load-bearing. Separately:
+non-auth links pass through untouched, a warm redirect is swallowed
+without exchanging, a cold start exchanges exactly once, and neither a
+rejected exchange nor a hung network can throw or stall the launch.
+
+Still unproven on hardware: that Android delivers the intent at all,
+which depends on the generated intent-filter. The harnesses live in the
+session scratchpad, not the repo — no test infrastructure exists for
+`mobile/` yet and adding jest-expo was out of scope for a bug fix.
