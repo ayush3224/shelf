@@ -30,7 +30,13 @@
       "expo-web-browser",
       "expo-audio",
       "expo-asset",
-      "@react-native-community/datetimepicker"
+      "@react-native-community/datetimepicker",
+      [
+        "expo-notifications",
+        {
+          "color": "#2F6F4E"
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

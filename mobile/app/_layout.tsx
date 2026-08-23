@@ -11,6 +11,7 @@ import { Stack } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
 
 import { AuthProvider, useAuth } from '../lib/auth';
+import { usePushNotifications } from '../lib/notifications';
 import { color } from '../lib/theme';
 
 // Warming the browser makes the Google hand-off feel instant instead of blank.
@@ -18,6 +19,12 @@ void WebBrowser.warmUpAsync();
 
 function RootNavigator() {
   const { session, loading } = useAuth();
+
+  // Registration and the Done/Snooze buttons (UC23, UC15, UC17). Mounted here
+  // rather than on a screen: a push arrives whether or not the app is open,
+  // and the response has to be handled wherever the app happens to be. It is
+  // gated on the session because a push token is stored against a user.
+  usePushNotifications(!!session);
 
   useEffect(() => {
     return () => {

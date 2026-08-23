@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "205461243644",
+    "project_id": "shelf-2a3f9",
+    "storage_bucket": "shelf-2a3f9.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:205461243644:android:d56c0ba327957b3601b979",
+        "android_client_info": {
+          "package_name": "com.shelf.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCVZ2hCv17SHeY1kmBTCFb96xXt9Tur9T4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

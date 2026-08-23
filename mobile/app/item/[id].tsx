@@ -10,6 +10,12 @@
  * is deliberately a detail-screen action and not a swipe on `Today` — the
  * system is supposed to decide state from behaviour (D2), and the manual move
  * is the escape hatch, not the main road.
+ *
+ * Two of the moves are not ordinary chips. **Reactivate** (UC20) is the
+ * counterweight to decay being silent: the system shelves and drops things
+ * without saying so, so the way back has to be obvious rather than one chip
+ * among four. **Snooze** (UC17) is here as well as on the notification,
+ * because "not now" is an answer you also give while looking at the thing.
  */
 import { useCallback, useEffect, useState } from 'react';
 import {
@@ -33,7 +39,9 @@ import {
   deleteItem,
   editItem,
   item as fetchItem,
+  reactivateItem,
   setItemState,
+  snoozeItem,
 } from '../../lib/api';
 import type { ItemDetail, ItemState } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -140,9 +148,60 @@ export default function ItemScreen() {
     void apply({ text: next }, 'Saved.');
   }, [text, detail, apply]);
 
+  /** Take it back off the shelf, and put a time on it (UC20). */
+  const reactivate = useCallback(async () => {
+    if (!detail || busy) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await reactivateItem(id);
+      // Reload rather than patch: the server decides the due time on the way
+      // back, and guessing it here is how the screen starts lying.
+      const updated = await fetchItem(id);
+      setDetail(updated);
+      setText(updated.text);
+      setNotice(
+        result.changed
+          ? `Back on Today — due ${fullDueLabel(updated.due_at)}.`
+          : 'Already active.',
+      );
+    } catch (e) {
+      await failed(e, 'Could not reactivate this item.');
+    } finally {
+      setBusy(false);
+    }
+  }, [detail, busy, id, failed]);
+
+  /** Not now (UC17). Counts toward decay exactly as ignoring it would. */
+  const snooze = useCallback(async () => {
+    if (!detail || busy) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await snoozeItem(id);
+      if (!result.changed) {
+        setDetail({ ...detail, state: result.state });
+        setNotice(`That one has moved — it is ${result.state} now.`);
+        return;
+      }
+      setDetail({ ...detail, due_at: result.due_at, state: 'active' });
+      setNotice(`Snoozed until ${fullDueLabel(result.due_at)}.`);
+    } catch (e) {
+      await failed(e, 'Could not snooze this item.');
+    } finally {
+      setBusy(false);
+    }
+  }, [detail, busy, id, failed]);
+
   const move = useCallback(
     async (state: ItemState) => {
       if (!detail || busy || detail.state === state) return;
+      // Coming back to `active` is reactivation whichever control asked for
+      // it, and reactivation is the one move that also has to settle a due
+      // time — an active item without one is invisible everywhere (D17).
+      if (state === 'active') return reactivate();
       setBusy(true);
       setError(null);
       setNotice(null);
@@ -156,7 +215,7 @@ export default function ItemScreen() {
         setBusy(false);
       }
     },
-    [detail, busy, id, failed],
+    [detail, busy, id, failed, reactivate],
   );
 
   const confirmDelete = useCallback(() => {
@@ -325,6 +384,53 @@ export default function ItemScreen() {
             />
           ) : null}
 
+          {detail.state === 'shelved' || detail.state === 'dropped' ? (
+            <>
+              <Text style={styles.label}>On the shelf</Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Reactivate this item"
+                disabled={busy}
+                onPress={() => void reactivate()}
+                style={({ pressed }) => [
+                  styles.primaryButton,
+                  pressed && styles.pressed,
+                  busy && styles.dimmed,
+                ]}
+              >
+                <Text style={styles.primaryLabel}>Put it back on Today</Text>
+              </Pressable>
+              <Text style={styles.hint}>
+                {detail.state === 'shelved'
+                  ? 'Shelved items are not due and do not remind you.'
+                  : 'Dropped items are out of the way, not gone.'}
+              </Text>
+            </>
+          ) : null}
+
+          {detail.state === 'active' && detail.due_at ? (
+            <>
+              <Text style={styles.label}>Not now</Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Snooze this item"
+                disabled={busy}
+                onPress={() => void snooze()}
+                style={({ pressed }) => [
+                  styles.secondaryButton,
+                  pressed && styles.pressed,
+                  busy && styles.dimmed,
+                ]}
+              >
+                <Text style={styles.secondaryLabel}>Snooze</Text>
+              </Pressable>
+              <Text style={styles.hint}>
+                Snoozing counts the same as ignoring it. Enough of either and
+                it goes to the shelf on its own.
+              </Text>
+            </>
+          ) : null}
+
           <Text style={styles.label}>State</Text>
           <View style={styles.chipRow}>
             {STATES.map(({ value, label }) => {
@@ -389,6 +495,26 @@ export default function ItemScreen() {
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: color.bg },
   fill: { flex: 1 },
+  // Reactivate is the only filled button on this screen. Decay is silent, so
+  // the way back out of it should not need looking for (UC20).
+  primaryButton: {
+    backgroundColor: color.accent,
+    borderRadius: radius.md,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  primaryLabel: { fontSize: 16, fontWeight: '600', color: color.accentText },
+  secondaryButton: {
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: color.border,
+    backgroundColor: color.surface,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  secondaryLabel: { fontSize: 15, fontWeight: '600', color: color.text },
+  pressed: { opacity: 0.7 },
+  hint: { fontSize: 13, lineHeight: 19, color: color.muted },
   centered: {
     flex: 1,
     backgroundColor: color.bg,

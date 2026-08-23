@@ -332,9 +332,89 @@ export function markDone(itemId: string): Promise<DoneResponse> {
   return request<DoneResponse>(`/items/${itemId}/done`, { method: 'POST' });
 }
 
-// ------------------------------------------------------------- item detail
-
+/** The four states an item can be in. Behaviour sets it, not the user. */
 export type ItemState = 'active' | 'shelved' | 'done' | 'dropped';
+
+// ----------------------------------------------------------------- devices
+
+export type DeviceRegistration = {
+  token: string;
+  platform: 'android' | 'ios' | 'web';
+  device_name?: string;
+};
+
+export type DeviceResponse = { registered: boolean; devices: number };
+
+/**
+ * Tell the server where to send this device's reminders (UC23).
+ *
+ * Called on every launch rather than once: Expo reissues the token when the
+ * app is reinstalled or its data is cleared, and the server has no way to
+ * notice a token has gone stale — a push to a dead one is accepted and then
+ * simply never arrives.
+ */
+export function registerDevice(device: DeviceRegistration): Promise<DeviceResponse> {
+  return request<DeviceResponse>('/devices', {
+    method: 'POST',
+    body: JSON.stringify(device),
+  });
+}
+
+// ------------------------------------------------------------------ snooze
+
+export type SnoozeResponse = {
+  id: string;
+  state: ItemState;
+  due_at: string | null;
+  snooze_count: number;
+  /** False when the item was no longer active — it had already decayed. */
+  changed: boolean;
+};
+
+/**
+ * Not now (UC17).
+ *
+ * Omitting `minutes` takes the server's default, which is what the
+ * notification button does — the duration is one number and it belongs in one
+ * place. A snooze counts toward the decay threshold exactly as an ignore does
+ * (UC18): both are the user saying not now.
+ */
+export function snoozeItem(itemId: string, minutes?: number): Promise<SnoozeResponse> {
+  return request<SnoozeResponse>(`/items/${itemId}/snooze`, {
+    method: 'POST',
+    body: JSON.stringify(minutes === undefined ? {} : { minutes }),
+  });
+}
+
+// -------------------------------------------------------------- reactivate
+
+export type ReactivateResponse = {
+  id: string;
+  state: ItemState;
+  previous: ItemState;
+  due_at: string | null;
+  changed: boolean;
+};
+
+/**
+ * Take an item back off the shelf (UC20).
+ *
+ * The counterweight to decay being silent: the system puts things away on its
+ * own, so there is one action that undoes it. The server gives the item a due
+ * time on the way back, because an active item without one is a thing nothing
+ * would ever surface again.
+ */
+export function reactivateItem(
+  itemId: string,
+  dueAt?: string,
+): Promise<ReactivateResponse> {
+  return request<ReactivateResponse>(`/items/${itemId}/reactivate`, {
+    method: 'POST',
+    body: JSON.stringify(dueAt === undefined ? {} : { due_at: dueAt }),
+  });
+}
+
+// ------------------------------------------------------------- item detail
 
 export type ItemDetail = {
   id: string;
