@@ -171,19 +171,20 @@ off-site copy is still worth adding.
 | Timezone handling (IST) | ✅ tested — "tomorrow 3pm" → 09:30Z |
 | `GET /items/today`, `POST /items/{id}/done` | ✅ live |
 | Item detail, edit, move, delete (UC37/38/21/39) | ✅ verified live |
-| Scheduler tick (`shelf-tick.timer`, 1 min) | ✅ live under systemd |
+| Scheduler tick (`shelf-tick.timer`, 1 min) | ✅ live under systemd, one log line per tick |
 | Auto-shelve on ignores/snoozes (UC18) | ✅ verified against the real DB and clock |
 | Auto-drop after 90 days (UC19) | ✅ verified by backdating real rows |
 | Snooze (UC17), reactivate (UC20) | ✅ verified live over HTTPS |
 | Push send path + Expo failure handling (UC23) | ✅ real round trip to `exp.host` |
-| A notification actually on the phone (UC23/UC15) | ❌ needs a build with `expo-notifications` installed |
+| A notification actually on the phone (UC23) | ✅ delivered 23 Aug, 19:58:25 — OnePlus 13R |
+| Answering one from the shade (UC15/UC17) | ❌ not yet pressed |
 | Expo app: capture, today, sign-in | ⚠️ built, never run on a phone |
 | Voice capture, hold-to-record (UC1) | ⚠️ upload body fixed (D26); not yet re-run on a phone |
 | Audio stored + signed playback (UC7) | ✅ verified live, byte-identical |
 | Cloud transcription (UC8) | ✅ verified live — Groq turbo, 1.6s round trip |
 | Multi-item splitting (UC4) | ⚠️ built, never run against real Haiku |
 | Mobile test suite (jest-expo) | ✅ 97 tests |
-| Backend test suite | ✅ 243 tests, plus 21 opt-in `-m db` |
+| Backend test suite | ✅ 247 tests, plus 25 opt-in `-m db` on their own schema |
 | Native dep tree vs SDK 57 matrix | ✅ reconciled, `expo-doctor` 21/21 |
 | Google OAuth redirect handling | ✅ callback swallowed, not routed |
 | Google OAuth config | ❌ not started |
@@ -267,6 +268,24 @@ did the system put something away that I wanted".
 
 Things this project has already paid for. Kept here so they don't have to be
 paid for twice.
+
+**A quiet job and a dead job must not look the same.** The scheduler logged
+only when something moved, on the reasoning that a line a minute is noise.
+The first time a push seemed not to arrive, that saved noise cost twenty
+minutes: `python -m backend.scheduler` printed nothing, changed nothing, and
+exited 0, which is exactly what a crash on the first line would also do. The
+scheduler had in fact worked correctly the whole time — the item was enqueued
+41 seconds after it fell due and delivered on the next tick. Every tick now
+logs what it *considered* as well as what it did, because "1 item due, 0
+queued" reads as a bug until "1 push already open" explains it.
+
+**A test that runs a cron job runs it on everything.** The scheduler is not
+scoped to a user — that is the point of it — so pointing the db suite at the
+live schema meant the tests swept the owner's real rows. They sent a real
+notification to the owner's phone, and one test, checking what happens when
+Expo reports a dead device, disabled the owner's live push token. Nothing in
+the test was wrong; the schema it ran against was. The suite now builds and
+drops its own.
 
 - **Inventory what's already running before provisioning anything.** The
   hosting decision moved three times before `docker ps` revealed a complete
@@ -1152,3 +1171,53 @@ session was two weeks of daily use, because every decay constant is guesswork
 until there is behaviour to tune it against. That has not happened. The work
 was done anyway, so the constants remain opinion — and there are three of them
 now, not two.
+
+### 23 August 2026 (later) — the scheduler was fine; the logging was not
+
+A push seemed not to arrive for an item due at 19:57:44. `shelf.notifications`
+looked empty, and a manual `python -m backend.scheduler` printed nothing,
+changed nothing and exited 0.
+
+**It had worked.** The journal showed the tick at 19:58:25 —
+`queued=1 sent=1` — the row existed with `sent_at 19:58:25.629097`, and the
+token's `last_success_at` matched to the millisecond. There was exactly one
+notification row and one device in the whole database, so the push that did
+arrive could not have come from anything else. The item fell due at 19:57:44
+and the timer fires on the minute; a query inside that 41-second window sees
+nothing, correctly. **A one-minute tick means a push lands up to a minute
+after `due_at`** — worth knowing before timing the next test by hand.
+
+What was actually broken was the ability to tell. `run_once` logged only when
+something moved, so a tick with nothing to do was indistinguishable from one
+that died before reaching the database. Every tick now logs, and logs what it
+was *looking at* as well as what it did:
+
+```
+tick: considered[active=1 due=1 shelved=6/0expired open=1/0overdue queued=0
+      devices=1] did[ignored=0 ... queued=0 sent=0 ...] 24ms
+```
+
+`due=1 queued=0` is the shape that reads as a bug. `open=1` is the answer:
+the item is due and already has a push outstanding, so there is nothing to
+enqueue until that one is answered or times out. Two other designed-in
+silences now name themselves — pushes queued with no registered device, and
+pushes that have exhausted their attempts — and `main()` logs a traceback and
+exits non-zero so a genuinely broken tick fails the unit.
+
+**And a real mistake, found while fixing it.** Running `pytest -m db` against
+the live schema did what it was always going to do. The scheduler sweeps every
+row it can see, so the suite enqueued the owner's real item and sent a real
+notification to the phone; then the test for a dead device — which stubs Expo
+into answering `DeviceNotRegistered` for every token it is handed — disabled
+the owner's live push token. It was re-enabled by hand within a minute, and
+the app re-registers on launch anyway, but the phone would have gone quiet
+otherwise.
+
+The tests were not wrong. The schema was. `tests/conftest.py` now builds
+`shelf_test` from the same migration files with the schema name substituted at
+read time — nothing on disk is edited — under a throwaway `auth.users` row,
+and drops both when the session ends. `push.send` is stubbed by an autouse
+fixture that *raises*, so forgetting to stub it fails the test instead of
+notifying somebody. Verified afterwards: only the `shelf` schema exists, the
+token is live, and all eight items and the single notification row are as they
+were.
