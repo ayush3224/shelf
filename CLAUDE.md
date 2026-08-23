@@ -90,3 +90,5 @@ These are non-negotiable; they're why the monthly bill stays under $1.
 - If a use case is ambiguous, ask before implementing an interpretation.
 - Don't build P1/P2 work while P0 is incomplete.
 - Update `docs/decisions.md` when a real decision gets made.
+- After completing work in a session, append an entry to
+  docs/build-log.md and update its Current state table.
