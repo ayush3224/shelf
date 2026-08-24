@@ -183,7 +183,7 @@ off-site copy is still worth adding.
 | Audio stored + signed playback (UC7) | ✅ verified live, byte-identical |
 | Cloud transcription (UC8) | ✅ verified live — Groq turbo, 1.6s round trip |
 | Multi-item splitting (UC4) | ⚠️ built, never run against real Haiku |
-| Mobile test suite (jest-expo) | ✅ 116 tests, incl. a real-tree render behind a 48dp inset |
+| Mobile test suite (jest-expo) | ✅ 120 tests, incl. real-tree renders behind a 48dp inset |
 | Backend test suite | ✅ 270 tests, plus 46 opt-in `-m db` on their own schema |
 | Native dep tree vs SDK 57 matrix | ✅ reconciled, `expo-doctor` 21/21 |
 | Google OAuth redirect handling | ✅ callback swallowed, not routed |
@@ -1420,3 +1420,34 @@ know yours was ignored.
 **Still not confirmed on the phone.** The mechanism is proven and the fix
 removes the dependency on the inset value entirely, but the exact inset on that
 OnePlus was never measured from here — it needs a build and one look.
+
+### 24 August 2026 — the chips, and the same lesson twice
+
+The Shelf's filter chips were cut off mid-label, both rows. No literal height
+this time: React Native's `ScrollView` defaults to `flexGrow: 1, flexShrink: 1`,
+the Shelf stacks three of them in a column beside a `SectionList` — a fourth —
+and when the page overflows all four shrink proportionally. The chip rows hold
+the least, so they lose their labels first. `flexGrow: 0, flexShrink: 0` fixes
+it; sizing to content is not the default.
+
+Two in two days is a pattern, so the whole app got audited for fixed heights.
+Three are circles — mic, play, done — where `width`/`height`/`borderRadius`
+*is* the shape; those stay. Two were text in a box: the primary buttons on
+capture and sign-in, `height: 52` around a 16px label. Fine at the default font
+scale, clipped the moment someone raises it. Both are now `minHeight` plus
+padding. The rule is in D42: a fixed height is for a shape, and a box holding
+text has its height as an outcome.
+
+**Two things found while writing the test, neither of them the bug.** Mounting
+the Shelf in jest OOM'd the runner — the test's own `useAuth` mock rebuilt its
+value object every render, and the Shelf's `load` effect depends on it
+transitively, so it refetched forever. The real `AuthProvider` memoises on
+`[session, loading, signingIn, error]` and is fine; the mock was not the app.
+Worth writing down because the failure looked like an app bug and was not. The
+other: a line-anchored regex rewriting `});` also rewrote the closers of the
+`jest.mock` blocks. Cheap to fix, easy to miss.
+
+**And the honest limit.** jest does no layout, so neither the D41 nor the D42
+test could have found its bug from scratch — both assert the *inputs* to a
+layout, not a rendered height. They catch regressions. Finding this class in
+the first place still takes a phone.

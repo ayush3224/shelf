@@ -370,7 +370,9 @@ export default function Shelf() {
         horizontal
         showsHorizontalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
+        style={styles.chipScroll}
         contentContainerStyle={styles.chipRow}
+        testID="chip-row"
       >
         {STATE_CHIPS.map((chip) => (
           <Chip
@@ -386,7 +388,9 @@ export default function Shelf() {
         horizontal
         showsHorizontalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
+        style={styles.chipScroll}
         contentContainerStyle={styles.chipRow}
+        testID="chip-row"
       >
         {WHEN_CHIPS.map((chip) => (
           <Chip
@@ -406,7 +410,9 @@ export default function Shelf() {
           horizontal
           showsHorizontalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
+          style={styles.chipScroll}
           contentContainerStyle={styles.chipRow}
+          testID="chip-row"
         >
           <Chip
             label="Unsorted"
@@ -512,6 +518,14 @@ const styles = StyleSheet.create({
     borderColor: color.border,
     borderRadius: radius.md,
   },
+  // A `ScrollView` defaults to `flexGrow: 1, flexShrink: 1` (RN's
+  // `styles.baseHorizontal`). Three of them in a column beside a `SectionList`
+  // — which is another one — means four siblings all willing to shrink, and
+  // when the page's content exceeds the screen they shrink *proportionally*.
+  // The chip rows hold the least, so they lose their labels first: both rows
+  // cut off mid-text. Sizing to content is not the default here; it has to be
+  // asked for (D42).
+  chipScroll: { flexGrow: 0, flexShrink: 0 },
   chipRow: {
     flexDirection: 'row',
     gap: space.sm,

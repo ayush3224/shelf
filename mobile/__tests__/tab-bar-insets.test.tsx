@@ -74,14 +74,20 @@ jest.mock('expo-audio', () => ({
 // stays real — `+native-intent.tsx` imports `isAuthCallbackUrl` from it.
 jest.mock('../lib/auth', () => {
   const actual = jest.requireActual('../lib/auth');
+  // One object, built once. The real `AuthProvider` memoises its context value
+  // on `[session, loading, signingIn, error]`, so `signOut` keeps its identity
+  // across renders. A mock that rebuilds it every render is not the app: the
+  // Shelf's `load` effect depends on it transitively, so it refetches forever
+  // and takes the runner's heap with it.
+  const value = {
+    session: { access_token: 'test-token', user: { id: 'u' } },
+    loading: false,
+    signOut: jest.fn(),
+  };
   return {
     ...actual,
     AuthProvider: ({ children }: { children: unknown }) => children,
-    useAuth: () => ({
-      session: { access_token: 'test-token', user: { id: 'u' } },
-      loading: false,
-      signOut: jest.fn(),
-    }),
+    useAuth: () => value,
   };
 });
 

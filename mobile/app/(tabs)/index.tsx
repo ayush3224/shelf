@@ -393,7 +393,12 @@ const styles = StyleSheet.create({
   button: {
     backgroundColor: color.accent,
     borderRadius: radius.pill,
-    height: 52,
+    // A floor, not a height: 52 is the tap target we want, but the label has
+    // to be able to push the box taller when the system font scale is turned
+    // up. A literal `height` here clips it instead (D42).
+    minHeight: 52,
+    paddingVertical: space.sm,
+    paddingHorizontal: space.md,
     alignItems: 'center',
     justifyContent: 'center',
   },

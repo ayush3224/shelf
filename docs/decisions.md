@@ -505,6 +505,35 @@ without knowing the inset, it should not be setting a height at all.
 *Revisit if:* never, in this direction. If the bar needs to be a different
 size, `BAR_CONTENT_HEIGHT` is the number to change.
 
+**D42 — A container that holds text sizes to the text. Twice now.**
+The Shelf's filter chips were cut off mid-label on the device. Same family as
+D41, different mechanism, and the second one in two days — so this is written
+as a rule rather than a fix.
+There was no literal height here. React Native's `ScrollView` defaults to
+`flexGrow: 1, flexShrink: 1` (`styles.baseHorizontal`), and the Shelf stacks
+three of them in a column beside a `SectionList`, which is a fourth. All four
+are willing to give up height, so when the page's content exceeds the screen
+they shrink *proportionally* — and the chip rows, holding the least, lose their
+labels first. Fixed with `flexGrow: 0, flexShrink: 0`: sizing to content is not
+the default, it has to be asked for.
+*The audit this prompted.* Every fixed height in `app/` and `lib/` was checked.
+Three are circles — the mic button, the play button, the done circle — where a
+fixed `width` and `height` with a matching `borderRadius` is the shape itself,
+and those stay. Two were text in a box: the primary buttons on the capture and
+sign-in screens, `height: 52` around a 16px label. Not visibly broken at the
+default font scale, and clipped the moment the system font size is raised. Both
+are now `minHeight: 52` with vertical padding — the tap target as a floor, with
+the label free to push past it.
+*The rule.* A fixed height is for a shape. If a box contains text, its height is
+an outcome: `minHeight` plus padding, never `height`. And if a box contains text
+*and* has flexible siblings, it also has to say it will not shrink.
+*Why the suite kept missing these.* Both bugs are layout, and jest does no
+layout. The tests added for D41 and D42 assert the *inputs* to the layout —
+that the inset is added, that the rows do not shrink — because that is the
+honest limit of what a renderer without a layout engine can check. It catches a
+regression; it would not have caught either bug from scratch. Only a phone does
+that, which is the real conclusion of both entries.
+
 ---
 
 ## Open
