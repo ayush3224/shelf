@@ -178,13 +178,24 @@ headers do not render at all.
 `entities` and `links` have been in the schema since migration 001 (D7). The
 module is extraction plus UI on top of them, not a migration:
 
-- The parse already returns `entities` — `{type, name}` for people, orgs and
-  places named in a capture. Today they are returned and discarded.
-- UC45 stores them: upsert into `entities` on `(user_id, type, name)`, then
-  write a `links` row per mention.
-- UC46 reads back the other way — every item linked to one entity, oldest
-  first.
-- UC47 lists and searches `entities`.
+**Built 24 August 2026, with no migration** — the tables were already there.
+
+- The parse has always returned `entities` — `{type, name}` for people, orgs
+  and places named in a capture — and always discarded them. UC45 is that
+  write: `resolve_entity` picks the row, then a `links` row records the
+  mention. Linking happens on every write path including each half of a split
+  (UC4), and it is **enrichment, never a gate**: a capture whose people cannot
+  be resolved keeps its words, exactly as a failed parse does (D6, UC42).
+- Resolution never guesses between two candidates (D43). The snapshot of known
+  entities is read once per capture and updated in memory as it goes, so two
+  split siblings that both say "Priya" land on one row rather than colliding on
+  the unique constraint.
+- UC46 reads back the other way: `GET /people/{id}`, every item linked to one
+  entity, **newest first** (the owner changed this from oldest-first on 24
+  August 2026) and every state, keyset-paginated like the Shelf (D39).
+- UC47 is `GET /people`, ordered by who was mentioned most recently and
+  searching aliases as well as names. Unpaginated on purpose: this table is
+  bounded by how many people are in a life, not by capture volume.
 
 **Recall is manual and stays that way for now.** No calendar triggering, no
 proactive surfacing. That needs UC43 and a delivery tier, and it should not

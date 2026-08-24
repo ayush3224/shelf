@@ -95,7 +95,7 @@ than a backfill over every note ever captured (D7).
 | ID | Use case | Pri |
 |----|----------|-----|
 | UC45 | Voice-record a note about a person; the parse extracts who it is about and links the note to them | P1 |
-| UC46 | Person page — everything ever said about them, oldest to newest | P1 |
+| UC46 | Person page — everything ever said about them, **newest first** (was "oldest to newest"; changed by the owner 24 August 2026 — the page is opened to see where things stand, and oldest-first buries that under the history) | P1 |
 | UC47 | Browse and search people | P1 |
 
 **Recall is manual, deliberately.** You go and look someone up. There is no

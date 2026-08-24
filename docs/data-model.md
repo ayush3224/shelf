@@ -76,7 +76,7 @@ the decay constants later** — don't skip it.
 ### `projects`
 `id`, `user_id`, `name`, `slug`.
 
-### `entities` *(UC44 — create now, populate later)*
+### `entities` *(populated since 24 August 2026 — UC45)*
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | uuid pk | |
@@ -84,15 +84,31 @@ the decay constants later** — don't skip it.
 | `name` | text | |
 | `aliases` | jsonb | other names the same entity goes by |
 
-### `links` *(UC44)*
+### `links` *(UC45)*
 Bidirectional edges between items and entities.
 `id`, `item_id`, `entity_id`, `relation`, `created_at`.
-Unique on `(item_id, entity_id, relation)`.
+Unique on `(item_id, entity_id, relation)` — which is what makes re-linking a
+capture idempotent rather than double-counting its mentions.
+
+**Name resolution** (`resolve_entity` in `backend/db.py`, D43) decides which
+row a parsed name belongs to: the same name, then a recorded alias, then a
+token subset in either direction — *only when exactly one entity matches*. Two
+Priyas on file means a bare "Priya" resolves to neither and gets its own row.
+A fuller name promotes: a row called "Priya" that meets "Priya Sharma" is
+renamed, keeping "Priya" in `aliases` so the earlier mentions stay attached.
+`aliases` is therefore load-bearing rather than decorative — it is both how
+past mentions survive a rename and what UC47's search matches on.
 
 > Creating `entities` and `links` in the first migration is deliberate.
 > The graph UI is P2, but retrofitting these tables after months of
 > items exist means a backfill pass over every note. Cheap now,
 > expensive later.
+>
+> **This paid off on 24 August 2026.** UC45-47 shipped with no migration at
+> all: the tables, the constraints and `links_entity_idx` were already there,
+> so the whole module was extraction and UI. Neither table has a text index
+> and neither needs one — `entities` is bounded by how many people are in a
+> life, not by capture volume, which is also why UC47's list is unpaginated.
 
 ### `notifications`
 `id`, `item_id`, `scheduled_for`, `tier` (`push`\|`alarm`\|`call`),

@@ -1,10 +1,12 @@
 """Database connection and operations."""
 
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, AsyncIterator, Optional, Sequence
 
 from psycopg import AsyncConnection
+from psycopg.types.json import Json
 from psycopg_pool import AsyncConnectionPool
 
 from backend.config import settings
@@ -31,6 +33,191 @@ def _escape_like(term: str) -> str:
         The same text, safe to wrap in `%...%`.
     """
     return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+@dataclass
+class EntityResolution:
+    """What to do with one name the parse pulled out of a capture (UC45)."""
+
+    #: The entity this name belongs to, or None when a new row is needed.
+    entity_id: Optional[str]
+    #: The canonical name to store. May differ from the one that arrived.
+    name: str
+    #: The full alias list to store alongside it.
+    aliases: list[str]
+    #: True when nothing matched and a row has to be written.
+    created: bool
+    #: True when a fuller name displaced the one already on the row.
+    promoted: bool
+    #: True when a match was declined because more than one thing matched.
+    ambiguous: bool
+
+
+def _normalized(name: str) -> str:
+    """Casefold and collapse whitespace, for comparison only.
+
+    Never stored. What the user said is what gets displayed; this is purely
+    the key the matching runs on.
+    """
+    return " ".join(name.split()).casefold()
+
+
+def _tokens(name: str) -> frozenset[str]:
+    """The set of words in a name, normalised."""
+    return frozenset(_normalized(name).split())
+
+
+def resolve_entity(
+    name: str, entity_type: str, existing: Sequence[dict[str, Any]]
+) -> Optional[EntityResolution]:
+    """Decide which person a name refers to (UC45).
+
+    The whole problem is that "Priya" and "Priya Sharma" are usually the same
+    person and occasionally are not, and getting it wrong in the merging
+    direction is much worse than getting it wrong in the splitting direction:
+    a wrongly split person is two lists you can see and reconcile, a wrongly
+    merged one silently attributes what you said about somebody to somebody
+    else, and nothing on the screen ever looks odd.
+
+    So the rule is **never guess when more than one thing matches**, in this
+    order:
+
+    1. The same name, normalised — the common case, and unique by constraint.
+    2. A recorded alias. If two entities claim the same alias, that is a tie
+       and it is declined.
+
+       **An alias beats the subset rule below, even when the subset rule would
+       find the match ambiguous.** Once "Priya" is an alias of Priya Sharma, a
+       later Priya Nair does not make bare "Priya" ambiguous again — it keeps
+       going to Sharma. That is a deliberate asymmetry: an alias is a
+       resolution that already happened out of real usage, whereas a subset is
+       an inference this function is making right now. Letting one new person
+       invalidate a binding built over a year would make the system worse the
+       longer it is used. The residual risk is real and is stated in O6: a bare
+       "Priya" that meant Nair lands on Sharma's page, and there is no way to
+       move it by hand yet.
+    3. A token subset in either direction: "Priya" against "Priya Sharma", or
+       "Priya Sharma" against a bare "Priya" already on file. **Only when
+       exactly one entity matches.** Two Priyas on file means a bare "Priya"
+       resolves to neither.
+    4. Otherwise it is somebody new.
+
+    Case 3 going the fuller way *promotes*: a row called "Priya" that meets
+    "Priya Sharma" is renamed, keeping "Priya" as an alias, because the fuller
+    name is the better label for a person page and the alias is what keeps the
+    shorter mentions attached.
+
+    A declined match creates its own row rather than linking to nothing. The
+    note has to be findable under some name, and a visible second "Priya" is a
+    thing the owner can see and act on; a note attached to nobody is not.
+
+    Args:
+        name: The name as the parse produced it.
+        entity_type: `person`, `org` or `place`. Matching never crosses types.
+        existing: Rows already on file, each with `id`, `type`, `name` and
+            `aliases`.
+
+    Returns:
+        What to write, or None if the name was blank.
+    """
+    wanted = _normalized(name)
+    if not wanted:
+        return None
+
+    display = " ".join(name.split())
+    same_type = [e for e in existing if e["type"] == entity_type]
+
+    # 1. The same name.
+    for entity in same_type:
+        if _normalized(entity["name"]) == wanted:
+            return EntityResolution(
+                entity_id=entity["id"],
+                name=entity["name"],
+                aliases=list(entity["aliases"]),
+                created=False,
+                promoted=False,
+                ambiguous=False,
+            )
+
+    # 2. A name we have already recorded as an alias of somebody.
+    alias_hits = [
+        e for e in same_type if any(_normalized(a) == wanted for a in e["aliases"])
+    ]
+    if len(alias_hits) == 1:
+        entity = alias_hits[0]
+        return EntityResolution(
+            entity_id=entity["id"],
+            name=entity["name"],
+            aliases=list(entity["aliases"]),
+            created=False,
+            promoted=False,
+            ambiguous=False,
+        )
+    if len(alias_hits) > 1:
+        return EntityResolution(
+            entity_id=None,
+            name=display,
+            aliases=[],
+            created=True,
+            promoted=False,
+            ambiguous=True,
+        )
+
+    # 3. One name contains the other, and only one candidate does.
+    wanted_tokens = _tokens(name)
+    subset_hits = [
+        e
+        for e in same_type
+        if wanted_tokens < _tokens(e["name"]) or _tokens(e["name"]) < wanted_tokens
+    ]
+
+    if len(subset_hits) > 1:
+        # Two Priyas. Guessing here is the one mistake that is invisible.
+        return EntityResolution(
+            entity_id=None,
+            name=display,
+            aliases=[],
+            created=True,
+            promoted=False,
+            ambiguous=True,
+        )
+
+    if len(subset_hits) == 1:
+        entity = subset_hits[0]
+        aliases = list(entity["aliases"])
+        if _tokens(entity["name"]) < wanted_tokens:
+            # The fuller name wins the label; the shorter one becomes the alias
+            # that keeps every past mention attached.
+            if not any(_normalized(a) == _normalized(entity["name"]) for a in aliases):
+                aliases.append(entity["name"])
+            return EntityResolution(
+                entity_id=entity["id"],
+                name=display,
+                aliases=aliases,
+                created=False,
+                promoted=True,
+                ambiguous=False,
+            )
+        if not any(_normalized(a) == wanted for a in aliases):
+            aliases.append(display)
+        return EntityResolution(
+            entity_id=entity["id"],
+            name=entity["name"],
+            aliases=aliases,
+            created=False,
+            promoted=False,
+            ambiguous=False,
+        )
+
+    # 4. Somebody new.
+    return EntityResolution(
+        entity_id=None,
+        name=display,
+        aliases=[],
+        created=True,
+        promoted=False,
+        ambiguous=False,
+    )
 
 
 class Database:
@@ -784,6 +971,284 @@ class Database:
             return row[0] if row else None
 
     # ------------------------------------------------------------- devices
+
+    async def link_entities(
+        self, user_id: str, item_id: str, entities: Sequence[dict[str, str]]
+    ) -> list[dict[str, Any]]:
+        """Attach a capture to the people it named (UC45).
+
+        The parse has returned `entities` since the first version and they were
+        thrown away every time — the tables were built in migration 001 for
+        exactly this (D7), so this is the write that was always missing rather
+        than a schema change.
+
+        Resolution is `resolve_entity`, and the snapshot it matches against is
+        read once per capture and then kept up to date in memory. That matters
+        for a split (UC4): two items from one recording that both say "Priya"
+        must land on one row, and they would not if each resolved against the
+        state before either was written.
+
+        Args:
+            user_id: Owner.
+            item_id: The capture to attach.
+            entities: `{type, name}` as the parse produced them.
+
+        Returns:
+            One entry per link written, each naming the entity it resolved to
+            and whether that resolution was a declined guess.
+        """
+        if not entities:
+            return []
+
+        pool = await self._ensure_pool()
+        linked: list[dict[str, Any]] = []
+
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                SELECT id::text, type::text, name, aliases
+                  FROM {settings.db_schema}.entities
+                 WHERE user_id = %s
+                """,
+                (user_id,),
+            )
+            columns = [c.name for c in result.description or []]
+            known = [dict(zip(columns, row)) for row in await result.fetchall()]
+
+            for parsed in entities:
+                name = (parsed.get("name") or "").strip()
+                entity_type = (parsed.get("type") or "person").strip() or "person"
+                if not name:
+                    continue
+
+                resolved = resolve_entity(name, entity_type, known)
+                if resolved is None:
+                    continue
+
+                if resolved.entity_id is None:
+                    created = await conn.execute(
+                        f"""
+                        INSERT INTO {settings.db_schema}.entities
+                          (user_id, type, name, aliases)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (user_id, type, name)
+                          DO UPDATE SET name = EXCLUDED.name
+                        RETURNING id::text
+                        """,
+                        (user_id, entity_type, resolved.name, Json(resolved.aliases)),
+                    )
+                    row = await created.fetchone()
+                    entity_id = row[0]
+                    known.append(
+                        {
+                            "id": entity_id,
+                            "type": entity_type,
+                            "name": resolved.name,
+                            "aliases": list(resolved.aliases),
+                        }
+                    )
+                else:
+                    entity_id = resolved.entity_id
+                    before = next((e for e in known if e["id"] == entity_id), None)
+                    changed = before is None or (
+                        before["name"] != resolved.name
+                        or list(before["aliases"]) != list(resolved.aliases)
+                    )
+                    if changed:
+                        # A promotion renames the row, which is a rename of the
+                        # person page. The alias is what stops that losing the
+                        # mentions filed under the shorter name.
+                        await conn.execute(
+                            f"""
+                            UPDATE {settings.db_schema}.entities
+                               SET name = %s, aliases = %s
+                             WHERE id = %s AND user_id = %s
+                            """,
+                            (resolved.name, Json(resolved.aliases), entity_id, user_id),
+                        )
+                        if before is not None:
+                            before["name"] = resolved.name
+                            before["aliases"] = list(resolved.aliases)
+
+                await conn.execute(
+                    f"""
+                    INSERT INTO {settings.db_schema}.links
+                      (item_id, entity_id, relation)
+                    VALUES (%s, %s, 'mentions')
+                    ON CONFLICT (item_id, entity_id, relation) DO NOTHING
+                    """,
+                    (item_id, entity_id),
+                )
+
+                linked.append(
+                    {
+                        "id": entity_id,
+                        "name": resolved.name,
+                        "type": entity_type,
+                        "ambiguous": resolved.ambiguous,
+                    }
+                )
+
+        return linked
+
+    async def list_people(
+        self, user_id: str, query: Optional[str] = None, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        """Everyone who has ever been mentioned, and how recently (UC47).
+
+        Ordered by the last thing said about them rather than alphabetically:
+        the list is for finding somebody, and the person you spoke about this
+        morning is a likelier target than the one from a year ago. Name order
+        is the tiebreak, and it is what an untouched list falls back to.
+
+        Searches aliases as well as the name, because the alias is precisely
+        the name you are likely to type — you look up "Priya", not the "Priya
+        Sharma" the row was promoted to.
+
+        Args:
+            user_id: Owner.
+            query: Substring to match against name and aliases.
+            limit: Hard cap; the list is not paginated because it is bounded by
+                how many people one person talks about, not by how much they
+                capture.
+
+        Returns:
+            People, most recently mentioned first.
+        """
+        where = ["e.user_id = %(user_id)s", "e.type = 'person'"]
+        params: dict[str, Any] = {"user_id": user_id, "limit": limit}
+
+        if query:
+            # `aliases::text` is a crude way into a jsonb array of strings and
+            # it is the right amount of machinery here: this table is bounded
+            # by the number of people in a life, not by capture volume.
+            where.append(
+                "(e.name ILIKE %(pattern)s ESCAPE '\\'"
+                " OR e.aliases::text ILIKE %(pattern)s ESCAPE '\\')"
+            )
+            params["pattern"] = f"%{_escape_like(query)}%"
+
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                SELECT e.id::text,
+                       e.name,
+                       e.type::text,
+                       e.aliases,
+                       count(l.id) AS mentions,
+                       max(i.created_at) AS last_mentioned
+                  FROM {settings.db_schema}.entities e
+                  LEFT JOIN {settings.db_schema}.links l ON l.entity_id = e.id
+                  LEFT JOIN {settings.db_schema}.items i ON i.id = l.item_id
+                 WHERE {' AND '.join(where)}
+                 GROUP BY e.id, e.name, e.type, e.aliases
+                 ORDER BY max(i.created_at) DESC NULLS LAST, e.name ASC
+                 LIMIT %(limit)s
+                """,
+                params,
+            )
+            columns = [c.name for c in result.description or []]
+            return [dict(zip(columns, row)) for row in await result.fetchall()]
+
+    async def get_person(
+        self, entity_id: str, user_id: str
+    ) -> Optional[dict[str, Any]]:
+        """One person, for the header of their page (UC46).
+
+        Args:
+            entity_id: Who.
+            user_id: Owner; scoping this is what stops a guessed id reading
+                someone else's contacts.
+
+        Returns:
+            The row with its mention count, or None.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                SELECT e.id::text,
+                       e.name,
+                       e.type::text,
+                       e.aliases,
+                       count(l.id) AS mentions,
+                       max(i.created_at) AS last_mentioned,
+                       e.created_at
+                  FROM {settings.db_schema}.entities e
+                  LEFT JOIN {settings.db_schema}.links l ON l.entity_id = e.id
+                  LEFT JOIN {settings.db_schema}.items i ON i.id = l.item_id
+                 WHERE e.id = %s AND e.user_id = %s
+                 GROUP BY e.id, e.name, e.type, e.aliases, e.created_at
+                """,
+                (entity_id, user_id),
+            )
+            columns = [c.name for c in result.description or []]
+            row = await result.fetchone()
+            return dict(zip(columns, row)) if row else None
+
+    async def person_items(
+        self,
+        entity_id: str,
+        user_id: str,
+        after: Optional[tuple[datetime, str]] = None,
+        limit: int = 30,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Everything ever said about one person (UC46).
+
+        Newest first and keyset-paginated, for the same reasons the Shelf is
+        (D38, D39): this list only grows, and the thing you want is usually the
+        thing you said last. Every state is included — a person page that hid
+        what you had already done about somebody would be answering a different
+        question than "what do I know here".
+
+        Args:
+            entity_id: Who.
+            user_id: Owner. Scoped on the *item*, so a link cannot be used to
+                read a row that is not yours.
+            after: `(created_at, id)` of the previous page's last row.
+            limit: Page size.
+
+        Returns:
+            The page, and whether another exists.
+        """
+        where = ["l.entity_id = %(entity_id)s", "i.user_id = %(user_id)s"]
+        params: dict[str, Any] = {
+            "entity_id": entity_id,
+            "user_id": user_id,
+            "limit": limit + 1,
+        }
+        if after is not None:
+            where.append("(i.created_at, i.id) < (%(cursor_at)s, %(cursor_id)s)")
+            params["cursor_at"], params["cursor_id"] = after
+
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                SELECT i.id::text,
+                       coalesce(nullif(i.parsed_text, ''), i.raw_text) AS text,
+                       i.raw_text,
+                       i.kind::text,
+                       i.state::text,
+                       i.due_at,
+                       i.critical,
+                       i.parse_status::text,
+                       i.audio_path IS NOT NULL AS has_audio,
+                       i.created_at
+                  FROM {settings.db_schema}.links l
+                  JOIN {settings.db_schema}.items i ON i.id = l.item_id
+                 WHERE {' AND '.join(where)}
+                 ORDER BY i.created_at DESC, i.id DESC
+                 LIMIT %(limit)s
+                """,
+                params,
+            )
+            columns = [c.name for c in result.description or []]
+            rows = [dict(zip(columns, row)) for row in await result.fetchall()]
+
+        has_more = len(rows) > limit
+        return rows[:limit], has_more
 
     async def register_push_token(
         self,

@@ -4,9 +4,16 @@
  * `index` is the capture screen, so the app opens on it and `Today` is one tap
  * away rather than the thing you land in.
  *
- * `Shelf` goes last on purpose. It is the archive (UC33) — the place you go
- * looking for something, not the place anything pushes you toward — and the
- * tab order is the only ranking of these three screens the app ever states.
+ * `Shelf` and `People` go last on purpose. Both are places you go looking for
+ * something rather than places anything pushes you toward, and the tab order is
+ * the only ranking of these screens the app ever states.
+ *
+ * Four is the ceiling. The bar is now one capture surface and three retrieval
+ * ones, which is already the wrong balance for an app whose whole bet is that
+ * capture is the thing that must stay cheap. If a fifth ever wants in, the
+ * answer is not a fifth tab: it is folding `Shelf` and `People` into one
+ * find-it screen with a scope toggle, since both are the same act — searching
+ * your own history — indexed by time in one case and by person in the other.
  *
  * **The height has to include the bottom safe-area inset, and that is not a
  * detail (D41).** React Navigation's tab bar adds the inset itself — but only
@@ -60,6 +67,7 @@ export default function TabsLayout() {
       <Tabs.Screen name="index" options={{ title: 'Capture' }} />
       <Tabs.Screen name="today" options={{ title: 'Today' }} />
       <Tabs.Screen name="shelf" options={{ title: 'Shelf' }} />
+      <Tabs.Screen name="people" options={{ title: 'People' }} />
     </Tabs>
   );
 }

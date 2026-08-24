@@ -183,8 +183,8 @@ off-site copy is still worth adding.
 | Audio stored + signed playback (UC7) | ✅ verified live, byte-identical |
 | Cloud transcription (UC8) | ✅ verified live — Groq turbo, 1.6s round trip |
 | Multi-item splitting (UC4) | ⚠️ built, never run against real Haiku |
-| Mobile test suite (jest-expo) | ✅ 120 tests, incl. real-tree renders behind a 48dp inset |
-| Backend test suite | ✅ 270 tests, plus 46 opt-in `-m db` on their own schema |
+| Mobile test suite (jest-expo) | ✅ 127 tests, incl. real-tree renders behind a 48dp inset |
+| Backend test suite | ✅ 295 tests, plus 67 opt-in `-m db` on their own schema |
 | Native dep tree vs SDK 57 matrix | ✅ reconciled, `expo-doctor` 21/21 |
 | Google OAuth redirect handling | ✅ callback swallowed, not routed |
 | Google OAuth config | ❌ not started |
@@ -193,7 +193,9 @@ off-site copy is still worth adding.
 | Tab bar visible on the device | ⚠️ fixed (D41); needs one look at a phone to confirm |
 | Route render failures surfaced, not swallowed | ✅ `ErrorBoundary` on root and tabs layouts |
 | Reactivate reachable from a list (UC20) | ✅ row button + item detail |
-| Sessions 4-5 | ❌ not started |
+| People: extract, link, browse, search (UC45/46/47) | ✅ verified live through the API, no migration |
+| Correcting a person by hand (merge/split/rename) | ❌ not built — O6 |
+| Session 5 | ❌ not started |
 
 ## 7. Pending — immediate
 
@@ -1451,3 +1453,72 @@ other: a line-anchored regex rewriting `});` also rewrote the closers of the
 test could have found its bug from scratch — both assert the *inputs* to a
 layout, not a rendered height. They catch regressions. Finding this class in
 the first place still takes a phone.
+
+### 24 August 2026 — session 4, People
+
+`entities` and `links` were written into migration 001 in the first week, for a
+module nobody was going to build for months (D7). The bet was that adding
+people later would be a write rather than a backfill over every note ever
+captured. **It paid: UC45-47 shipped with no migration at all.** The tables,
+the unique constraints and `links_entity_idx` were already the right shape, so
+the whole session was extraction and UI. Worth recording as a case where the
+speculative work was correct, since the opposite is what usually gets written
+down.
+
+**The schema was never the hard part.** Deciding when two names are one person
+was. The parse returns "Priya" one day and "Priya Sharma" the next, and they
+are usually the same person and occasionally are not. What settles it is that
+the two ways of being wrong are not symmetric:
+
+- A wrong **merge** is silent. What you said about Priya Nair is filed on Priya
+  Sharma's page, every screen looks normal, and you find out by being wrong
+  about somebody to their face.
+- A wrong **split** is two Priyas in a list you are already looking at.
+
+So `resolve_entity` splits when it is unsure (D43): same name, then a recorded
+alias, then a token subset in either direction — and **only when exactly one
+candidate matches**. Two Priyas on file means a bare "Priya" resolves to neither
+and gets its own row rather than being guessed onto one. A fuller name promotes:
+"Priya" meeting "Priya Sharma" renames the row and keeps "Priya" as an alias,
+which is what stops the rename orphaning every mention filed under the short
+name. It is also why aliases are searched — you look somebody up by the name you
+remember, which is the alias, not the canonical one the row was promoted to.
+
+**One asymmetry found by running it live rather than by reading it.** The
+end-to-end check did the obvious sequence — "Priya", then "Priya Sharma", then
+"Priya Nair", then a bare "Priya" — expecting the last one to be declined as
+ambiguous. It went to Sharma. The alias rule had matched before the ambiguity
+check ever ran.
+
+That is arguably correct and it is now a decision rather than an accident. An
+alias is a resolution that already happened out of real usage; a subset is an
+inference being made now. If one new namesake could invalidate a binding built
+over a year of captures, the system would get worse the longer it was used. So
+alias precedence stays, the reasoning is in D43, two tests pin both halves of
+it, and the residual risk — a bare "Priya" that meant Nair landing on Sharma's
+page — is written down as O6 rather than left implicit.
+
+**Four tabs, and a ceiling (D44).** People earns a tab because it is a second
+*index* over the same items rather than a subset of the Shelf: you go to the
+Shelf when you remember roughly when, and to People when you remember who, and
+neither contains the other — a person-note due today is on People and never on
+the Shelf, which excludes `active` by definition. The cost is that the bar is
+now one capture surface and three retrieval ones, which is the wrong balance
+for an app betting on cheap capture. Four is the ceiling, written into the
+layout file as well as the decision: a fifth means folding Shelf and People into
+one find-it screen with a scope toggle, not adding a tab.
+
+**Verified live through the API.** Real captures naming a person, the promotion
+from "Priya" to "Priya Sharma" happening on the second capture, the person page
+newest-first with the earlier mention still attached, search hitting the alias
+rather than the canonical name, and the ambiguity guard keeping "Priya Nair"
+separate. All four test captures were deleted afterwards; the schema is back to
+twelve items, no entities, no links.
+
+**Not built, on purpose:** any way to correct a person by hand — merge, split,
+rename, unlink (O6). Three paths can produce a row a human would want to
+reconcile, and what the fix should look like depends on which of them actually
+happens in use. Recall also stays manual: nothing here surfaces itself, no
+calendar triggering, no proactive "you are seeing Ravi in an hour". That needs
+UC43 and a delivery tier and should not be built before the version you have to
+go and open has been used.

@@ -52,9 +52,10 @@ class HealthResponse(BaseModel):
 class CaptureResponse(BaseModel):
     """Response for /capture endpoint.
 
-    `text` is persisted as `items.parsed_text` (migration 002). `project_hint`
-    and `entities` are returned but not stored — project inference is UC11 and
-    entity linking is UC44, both phase 6.
+    `text` is persisted as `items.parsed_text` (migration 002). `entities` are
+    now stored as well — they are resolved to `entities` rows and linked to the
+    item (UC45), and echoed here as the parse produced them. `project_hint`
+    remains returned-but-unstored: UC11 was dropped.
     """
 
     id: str
@@ -256,6 +257,49 @@ class ProjectsResponse(BaseModel):
     """
 
     projects: list[ProjectSummary]
+
+
+class Person(BaseModel):
+    """One person, for the People list and the top of their page (UC46, UC47)."""
+
+    id: str
+    name: str
+    type: str
+    #: Other names the same person goes by. This is what makes a bare "Priya"
+    #: keep landing on the row that got renamed to "Priya Sharma".
+    aliases: list[str] = Field(default_factory=list)
+    mentions: int = 0
+    last_mentioned: Optional[datetime] = None
+
+
+class PeopleResponse(BaseModel):
+    """Response for GET /people (UC47)."""
+
+    people: list[Person]
+
+
+class PersonItem(BaseModel):
+    """One thing that was said about somebody (UC46)."""
+
+    id: str
+    text: str
+    raw_text: str
+    kind: str
+    state: str
+    due_at: Optional[datetime] = None
+    critical: bool
+    parse_status: str
+    has_audio: bool = False
+    created_at: datetime
+
+
+class PersonResponse(BaseModel):
+    """Response for GET /people/{id} — the person and one page of their notes."""
+
+    person: Person
+    items: list[PersonItem]
+    next_cursor: Optional[str] = None
+    has_more: bool = False
 
 
 class DoneResponse(BaseModel):
@@ -468,6 +512,7 @@ async def _write_split(
         return []
 
     written = [_captured(item_id, parts[0])]
+    await _link_people(db, user_id, item_id, parts[0].entities)
 
     for part in parts[1:]:
         try:
@@ -490,8 +535,46 @@ async def _write_split(
             logger.warning("Could not write a split sibling of %s: %s", item_id, e)
             continue
         written.append(_captured(sibling_id, part))
+        await _link_people(db, user_id, sibling_id, part.entities)
 
     return written
+
+
+async def _link_people(
+    db: Database, user_id: str, item_id: str, entities: list[dict[str, str]]
+) -> None:
+    """Attach a written item to the people it named (UC45).
+
+    Enrichment, never a gate — the same rule the parse itself follows (D6,
+    UC42). A capture whose people cannot be resolved is a capture with the
+    words still in it; failing the request here would trade the thing that
+    cannot be reproduced for the thing that can be recomputed later.
+
+    Args:
+        db: Database connection.
+        user_id: Owner.
+        item_id: The item just written.
+        entities: `{type, name}` from the parse.
+    """
+    if not entities:
+        return
+    try:
+        linked = await db.link_entities(user_id, item_id, entities)
+    except Exception as e:
+        logger.warning("Could not link people for item %s: %s", item_id, e)
+        return
+
+    # An ambiguous name got its own row rather than being guessed onto an
+    # existing one. Worth a line in the log: it is the case a human may want
+    # to reconcile, and nothing on the screen announces it (O6).
+    for entry in linked:
+        if entry.get("ambiguous"):
+            logger.info(
+                "Ambiguous entity %r on item %s — filed under its own row %s",
+                entry.get("name"),
+                item_id,
+                entry.get("id"),
+            )
 
 
 @app.post("/capture", response_model=CaptureResponse)
@@ -577,6 +660,7 @@ async def capture(
                 kind="task",
             )
         written = [_captured(item_id, parsed)]
+        await _link_people(db, user_id, item_id, parsed.entities)
 
     head = written[0]
     return CaptureResponse(
@@ -1031,6 +1115,98 @@ async def browse_items(
         ),
         has_more=has_more and bool(rows),
         states=list(states),
+    )
+
+
+@app.get("/people", response_model=PeopleResponse)
+async def list_people(
+    q: Optional[str] = Query(default=None, description="Search names and aliases"),
+    db: Database = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+) -> PeopleResponse:
+    """Browse and search the people who have been mentioned (UC47).
+
+    Not paginated, unlike every other list here. This one is bounded by how
+    many people are in a life rather than by how much gets captured, so the
+    keyset machinery the Shelf needs (D39) would be weight without a load.
+
+    Args:
+        q: Substring to match against names and aliases.
+        db: Database connection.
+        user_id: Authenticated user, from the Supabase token.
+
+    Returns:
+        People, most recently mentioned first.
+    """
+    try:
+        rows = await db.list_people(user_id, query=q.strip() if q else None)
+    except Exception as e:
+        logger.error("Failed to list people for user %s: %s", user_id, e)
+        raise HTTPException(status_code=500, detail="Failed to load people")
+
+    return PeopleResponse(people=[Person(**row) for row in rows])
+
+
+@app.get("/people/{entity_id}", response_model=PersonResponse)
+async def person_page(
+    entity_id: UUID,
+    cursor: Optional[str] = Query(default=None, description="From a previous page"),
+    limit: int = Query(default=_DEFAULT_PAGE, ge=1, le=_MAX_PAGE),
+    db: Database = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+) -> PersonResponse:
+    """Everything ever said about one person (UC46).
+
+    Newest first. `docs/use-cases.md` wrote UC46 as "oldest to newest"; the
+    owner asked for the reverse on 24 August 2026 and the doc has been amended
+    to match. The reason holds up: the page is opened to remember where things
+    stand, and oldest-first buries that under the history every time.
+
+    Every state is here, including `done` and `dropped`. A person page that
+    hid what you had already dealt with would be answering a narrower question
+    than the one it is for.
+
+    Args:
+        entity_id: Who.
+        cursor: Opaque page boundary from the previous response.
+        limit: Page size.
+        db: Database connection.
+        user_id: Authenticated user, from the Supabase token.
+
+    Returns:
+        The person and one page of what was said about them.
+
+    Raises:
+        HTTPException: 404 if this user has no such person, 400 on a bad cursor.
+    """
+    after = _decode_cursor(cursor) if cursor else None
+
+    try:
+        person = await db.get_person(str(entity_id), user_id)
+    except Exception as e:
+        logger.error("Failed to load person %s: %s", entity_id, e)
+        raise HTTPException(status_code=500, detail="Failed to load person")
+
+    if person is None:
+        raise HTTPException(status_code=404, detail="No such person")
+
+    try:
+        rows, has_more = await db.person_items(
+            str(entity_id), user_id, after=after, limit=limit
+        )
+    except Exception as e:
+        logger.error("Failed to load notes for person %s: %s", entity_id, e)
+        raise HTTPException(status_code=500, detail="Failed to load person")
+
+    return PersonResponse(
+        person=Person(**person),
+        items=[PersonItem(**row) for row in rows],
+        next_cursor=(
+            _encode_cursor(rows[-1]["created_at"], rows[-1]["id"])
+            if has_more and rows
+            else None
+        ),
+        has_more=has_more and bool(rows),
     )
 
 

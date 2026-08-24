@@ -594,3 +594,65 @@ export type ProjectSummary = {
 export function projects(): Promise<{ projects: ProjectSummary[] }> {
   return request<{ projects: ProjectSummary[] }>('/projects');
 }
+
+// ------------------------------------------------------------------ people
+
+/**
+ * One person (UC46, UC47).
+ *
+ * `aliases` is the other names the same person goes by. It is what keeps a
+ * bare "Priya" landing on the row a later capture renamed to "Priya Sharma",
+ * and it is searched alongside the name — the alias is usually the name you
+ * actually remember.
+ */
+export type Person = {
+  id: string;
+  name: string;
+  type: 'person' | 'org' | 'place';
+  aliases: string[];
+  mentions: number;
+  last_mentioned: string | null;
+};
+
+/** One thing that was said about somebody (UC46). */
+export type PersonItem = {
+  id: string;
+  text: string;
+  raw_text: string;
+  kind: 'task' | 'note' | 'person_note';
+  state: ItemState;
+  due_at: string | null;
+  critical: boolean;
+  parse_status: 'ok' | 'failed' | 'needs_review';
+  has_audio: boolean;
+  created_at: string;
+};
+
+export type PersonPage = {
+  person: Person;
+  items: PersonItem[];
+  next_cursor: string | null;
+  has_more: boolean;
+};
+
+/**
+ * Browse and search the people who have been mentioned (UC47).
+ *
+ * Not paginated, unlike the Shelf: this list is bounded by how many people are
+ * in a life rather than by how much gets captured.
+ */
+export function people(query?: string): Promise<{ people: Person[] }> {
+  const qs = query ? `?q=${encodeURIComponent(query)}` : '';
+  return request<{ people: Person[] }>(`/people${qs}`);
+}
+
+/**
+ * Everything ever said about one person (UC46).
+ *
+ * Newest first, and every state — a page that hid what you had already dealt
+ * with would answer a narrower question than the one it is open for.
+ */
+export function person(entityId: string, cursor?: string): Promise<PersonPage> {
+  const qs = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
+  return request<PersonPage>(`/people/${entityId}${qs}`);
+}

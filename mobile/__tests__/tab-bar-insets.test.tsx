@@ -169,14 +169,29 @@ async function mount(): Promise<void> {
   });
 }
 
-test('all three tabs render', async () => {
+test('all four tabs render', async () => {
   await mount();
 
   // `getAllByText` rather than `getByText`: the capture screen's own heading is
   // the word "Shelf" too, so the tab label is not the only match.
-  for (const label of ['Capture', 'Today', 'Shelf']) {
+  for (const label of ['Capture', 'Today', 'Shelf', 'People']) {
     expect(screen.getAllByText(label).length).toBeGreaterThan(0);
   }
+});
+
+test('a fourth tab does not squeeze the labels out', async () => {
+  await mount();
+  const style = tabBarStyle();
+
+  // The bar's height is set by the inset and a constant, not by how many tabs
+  // are in it — so adding People is a width question, never a height one. This
+  // is here because the height is the thing that broke before (D41), and a new
+  // tab is exactly the sort of change that invites someone to "just set it".
+  const forLabels =
+    (style.height as number) -
+    ((style.paddingTop as number) ?? 0) -
+    ((style.paddingBottom as number) ?? 0);
+  expect(forLabels).toBeGreaterThanOrEqual(20);
 });
 
 test('the inset is added to the height, not absorbed by it', async () => {

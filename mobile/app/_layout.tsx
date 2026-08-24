@@ -44,9 +44,11 @@ function RootNavigator() {
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Protected guard={!!session}>
         <Stack.Screen name="(tabs)" />
-        {/* Item detail sits outside the tabs: it is reached from a row, and
-            giving it a tab would make it a place rather than a detour. */}
+        {/* Item detail and a person page both sit outside the tabs: each is
+            reached from a row, and giving either a tab would make it a place
+            rather than a detour. */}
         <Stack.Screen name="item/[id]" />
+        <Stack.Screen name="person/[id]" />
       </Stack.Protected>
       <Stack.Protected guard={!session}>
         <Stack.Screen name="sign-in" />

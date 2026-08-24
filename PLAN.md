@@ -129,7 +129,7 @@ but it still needs a build and one look.
 
 ---
 
-## Session 4 — People (P1)
+## Session 4 — People ✅ *(built 24 August 2026)*
 
 - UC45 voice-record a note about a person; the parse extracts who and links it
 - UC46 person page — everything ever said about them
@@ -145,6 +145,26 @@ used enough to know what is worth surfacing.
 
 **Exit:** you can open a person and read everything you have ever said about
 them, and adding to it costs one voice note.
+
+*Built with **no migration**, as predicted — `entities`, `links`, their
+constraints and `links_entity_idx` were all in place from 001, so the whole
+module was extraction and UI. That bet (D7) is now paid off rather than
+theoretical.*
+
+*The hard part was not the schema, it was deciding when two names are one
+person (D43): same name, then a recorded alias, then a token subset — and only
+ever when exactly one candidate matches. "Priya" and "Priya Sharma" merge, with
+the fuller name promoted and the shorter kept as an alias so earlier mentions
+stay attached. Two Priyas on file and a bare "Priya" resolves to neither,
+because a wrong merge is silent and a wrong split is visible.*
+
+*People takes the fourth tab (D44), and four is written down as the ceiling.*
+
+**Still outstanding:** no way to correct a person by hand — merge, split,
+rename, or move a note off the wrong page (O6). Deliberately unbuilt: none of
+UC45-47 asks for it, and what it should look like depends on which of the three
+ways a bad row can appear actually turns up in use. And, as ever, none of this
+has been touched on a phone.
 
 ---
 

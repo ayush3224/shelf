@@ -534,9 +534,68 @@ honest limit of what a renderer without a layout engine can check. It catches a
 regression; it would not have caught either bug from scratch. Only a phone does
 that, which is the real conclusion of both entries.
 
+**D43 — A name resolves to a person only when exactly one thing matches.**
+`resolve_entity` (in `backend/db.py`) turns a name the parse produced into an
+`entities` row: the same name, then a recorded alias, then a token subset in
+either direction — and **only when exactly one candidate matches** at that step.
+The asymmetry is the whole design. A wrong *merge* is silent: what you said
+about Priya Nair is filed on Priya Sharma's page, and nothing on any screen
+ever looks odd, so you find out by being wrong about somebody in person. A
+wrong *split* is two Priyas in a list you are looking at. So when the rule is
+uncertain it splits, and an unresolved name gets its own row rather than
+linking to nothing — the note has to be findable under some name.
+A fuller name **promotes**: a row called "Priya" that meets "Priya Sharma" is
+renamed and keeps "Priya" in `aliases`. That is what stops a rename orphaning
+every mention filed under the shorter name, and it is why `aliases` is
+load-bearing rather than decorative — UC47 searches it too, because the alias
+is usually the name you actually remember.
+*One deliberate exception:* an alias beats the subset rule even when the subset
+rule would find the match ambiguous. Once "Priya" is an alias of Priya Sharma,
+a later Priya Nair does not make bare "Priya" ambiguous again. An alias is a
+resolution that already happened out of real usage; a subset is an inference
+being made now. Letting one new namesake invalidate a binding built over a year
+would make the system worse the longer it is used. The residual risk is O6.
+*Known limit, not papered over:* "Sharma Priya" has the same tokens as "Priya
+Sharma" but neither set is a *proper* subset of the other, so it becomes its own
+row. Matching on token equality would fix that case and merge genuinely
+different orderings elsewhere; this fails in the visible direction.
+*Revisit if:* the People list starts filling with near-duplicates. That means
+the subset rule is too strict, not that the direction is wrong.
+
+**D44 — People gets the fourth tab, and that is the ceiling.**
+UC47 is a tab rather than a screen inside the Shelf.
+People is a second *index* over the same items, not a subset of the Shelf. You
+go to the Shelf when you remember roughly *when* you said something and to
+People when you remember *who*, and neither list contains the other — a
+person-note that is due today appears under People and never on the Shelf,
+which excludes `active` by definition. Nesting it would imply a containment
+that is not true and would put a tap in front of the one flow whose entire
+justification (manual, deliberate recall) is being quick.
+*What this costs.* The bar is now one capture surface and three retrieval ones,
+which is the wrong balance for an app whose bet is that capture stays cheap.
+Four is therefore the ceiling, and it is written down in
+`app/(tabs)/_layout.tsx` as well as here. If a fifth ever wants in the answer is
+not a fifth tab: fold `Shelf` and `People` into one find-it screen with a scope
+toggle, because both are the same act — searching your own history — indexed by
+time in one case and by person in the other.
+*Revisit if:* a fifth retrieval surface is proposed, or daily use shows People
+being opened rarely enough that a tab is not paying for itself.
+
 ---
 
 ## Open
+
+**O6 — Correcting a person by hand.** Nothing can merge two entities,
+split one, rename it, or move a note off the wrong page. Three paths already
+produce rows a human would want to reconcile: an ambiguous name that was
+declined and got its own row (D43), a name the subset rule cannot see as the
+same person ("Sharma Priya"), and the residual risk of alias precedence — a
+bare "Priya" that meant Nair landing on Sharma's page.
+Not built in session 4 because it is a fourth use case and none of UC45-47 asks
+for it, and because what it should look like depends on which of those three
+actually happens. The `transitions` table is no help here; the evidence is the
+People list itself. *Answer it by:* using People for a month and counting the
+near-duplicates. If there are none, this stays unbuilt.
 
 **O1 — `SHELVE_AFTER_IGNORES`.** Default 3. After a month, query
 `transitions` for items that were shelved by decay and later
