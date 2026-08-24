@@ -502,3 +502,95 @@ export type AudioUrlResponse = { id: string; url: string; expires_in: number };
 export function audioUrl(itemId: string): Promise<AudioUrlResponse> {
   return request<AudioUrlResponse>(`/items/${itemId}/audio`);
 }
+
+// ------------------------------------------------------------------- shelf
+
+/**
+ * One row of the Shelf (UC33).
+ *
+ * `project_id` and `project_name` come down per item rather than the server
+ * returning sections, because the list is paginated and a project's items can
+ * straddle a page boundary. Grouping is the client's job for exactly that
+ * reason — see `groupByProject` in the Shelf screen.
+ */
+export type ShelfItem = {
+  id: string;
+  text: string;
+  raw_text: string;
+  kind: 'task' | 'note' | 'person_note';
+  state: ItemState;
+  due_at: string | null;
+  critical: boolean;
+  parse_status: 'ok' | 'failed' | 'needs_review';
+  has_audio: boolean;
+  project_id: string | null;
+  project_name: string | null;
+  /** When it was captured. This is what the list is ordered by (D38). */
+  created_at: string;
+  /** When the system last moved it. Shown on decayed rows, not sorted on. */
+  state_changed_at: string;
+};
+
+export type ShelfPage = {
+  items: ShelfItem[];
+  /** Opaque. Hand it straight back as `cursor`; never take it apart. */
+  next_cursor: string | null;
+  has_more: boolean;
+  /** The states the server actually applied, which may be the default. */
+  states: ItemState[];
+};
+
+export type ShelfQuery = {
+  /** Search text (UC34). Two characters minimum, or the server refuses. */
+  q?: string;
+  /** States to include. Empty takes the server's default. */
+  states?: ItemState[];
+  /** A project id, or `'none'` for items with no project (UC36). */
+  project?: string;
+  /** Earliest capture time, inclusive — an ISO string. */
+  from?: string;
+  /** Latest capture time, exclusive — an ISO string. */
+  to?: string;
+  cursor?: string;
+  limit?: number;
+};
+
+/**
+ * Browse, search and filter every item (UC33, UC34, UC36).
+ *
+ * With no arguments this is the Shelf: everything that is not `active`.
+ * Passing `q` widens it to all four states server-side, because a search is a
+ * question about what you said and not about where the item currently sits.
+ */
+export function browseItems(query: ShelfQuery = {}): Promise<ShelfPage> {
+  const params = new URLSearchParams();
+  if (query.q) params.append('q', query.q);
+  // Repeated rather than comma-joined: the server reads `state` as a list.
+  for (const state of query.states ?? []) params.append('state', state);
+  if (query.project) params.append('project', query.project);
+  if (query.from) params.append('from', query.from);
+  if (query.to) params.append('to', query.to);
+  if (query.cursor) params.append('cursor', query.cursor);
+  if (query.limit !== undefined) params.append('limit', String(query.limit));
+
+  const qs = params.toString();
+  return request<ShelfPage>(`/items${qs ? `?${qs}` : ''}`);
+}
+
+export type ProjectSummary = {
+  id: string;
+  name: string;
+  slug: string;
+  items: number;
+};
+
+/**
+ * The projects the filter chips are drawn from (UC36).
+ *
+ * Normally empty. UC11 was dropped, so nothing infers a project and one only
+ * exists if it was created by hand — the chip row not rendering is that
+ * decision showing through, not a missing feature.
+ */
+export function projects(): Promise<{ projects: ProjectSummary[] }> {
+  return request<{ projects: ProjectSummary[] }>('/projects');
+}

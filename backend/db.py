@@ -2,7 +2,7 @@
 
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Optional, Sequence
 
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
@@ -14,6 +14,23 @@ from backend.config import settings
 # took it back out, which is exactly the event O1 and O2 get tuned against.
 # Undoing a `done` is not that, so `done` is not in here.
 _REACTIVATED_FROM = ("shelved", "dropped")
+
+
+def _escape_like(term: str) -> str:
+    """Make a search term literal inside an ILIKE pattern.
+
+    The user types into a search box, not a query language: a `%` they typed
+    is a percent sign they are looking for, and left unescaped it would match
+    the entire table instead. The backslash is escaped first, or escaping the
+    wildcards would then be undone by it.
+
+    Args:
+        term: Raw text from the search field.
+
+    Returns:
+        The same text, safe to wrap in `%...%`.
+    """
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 class Database:
@@ -327,6 +344,155 @@ class Database:
                  LIMIT %s
                 """,
                 (user_id, before, limit),
+            )
+            columns = [c.name for c in result.description or []]
+            return [dict(zip(columns, row)) for row in await result.fetchall()]
+
+    async def browse_items(
+        self,
+        user_id: str,
+        states: Sequence[str],
+        query: Optional[str] = None,
+        project_id: Optional[str] = None,
+        unsorted_only: bool = False,
+        created_from: Optional[datetime] = None,
+        created_to: Optional[datetime] = None,
+        after: Optional[tuple[datetime, str]] = None,
+        limit: int = 30,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """The Shelf list: browse, search and filter in one query (UC33/34/36).
+
+        One method rather than three because they are one screen. Search is a
+        filter like any other, and a search that could not also be narrowed to
+        a state or a date would just be a second, worse list.
+
+        Ordered by `created_at` — when the thing was *said* — and not by
+        `state_changed_at`, which is when the system last moved it. That is a
+        deliberate choice about what the shelf is (D38): capture order reads as
+        an archive, whereas decay order puts whatever was most recently taken
+        away from you at the top, which is the reading this screen is supposed
+        not to have.
+
+        Paginated by keyset, not offset. `(created_at, id)` is a total order
+        thanks to the id tiebreak, so a page boundary cannot repeat or skip a
+        row when a capture lands mid-scroll — which an `OFFSET` would, and this
+        table only ever grows.
+
+        Args:
+            user_id: Owner of the items.
+            states: States to include. Empty means every state.
+            query: Substring to match against `raw_text` and `parsed_text`
+                (UC34). Matched case-insensitively via the trigram indexes.
+            project_id: Restrict to one project (UC36).
+            unsorted_only: Restrict to items with no project at all. Mutually
+                exclusive with `project_id`; the caller enforces that.
+            created_from: Earliest capture time to include, inclusive.
+            created_to: Latest capture time to include, exclusive.
+            after: The `(created_at, id)` of the last row of the previous page.
+            limit: Rows per page.
+
+        Returns:
+            The page, and whether another one exists. `has_more` comes from
+            asking for one row past the limit rather than from a second count
+            query, which would be a whole extra scan to answer a boolean.
+        """
+        where = ["i.user_id = %(user_id)s"]
+        params: dict[str, Any] = {"user_id": user_id, "limit": limit + 1}
+
+        if states:
+            where.append(
+                f"i.state = ANY(%(states)s::{settings.db_schema}.item_state[])"
+            )
+            params["states"] = list(states)
+
+        if query:
+            # ESCAPE so a literal % or _ in the search box matches itself
+            # instead of turning into a wildcard.
+            where.append(
+                "(i.raw_text ILIKE %(pattern)s ESCAPE '\\'"
+                " OR i.parsed_text ILIKE %(pattern)s ESCAPE '\\')"
+            )
+            params["pattern"] = f"%{_escape_like(query)}%"
+
+        if unsorted_only:
+            where.append("i.project_id IS NULL")
+        elif project_id:
+            where.append("i.project_id = %(project_id)s")
+            params["project_id"] = project_id
+
+        if created_from is not None:
+            where.append("i.created_at >= %(created_from)s")
+            params["created_from"] = created_from
+
+        if created_to is not None:
+            where.append("i.created_at < %(created_to)s")
+            params["created_to"] = created_to
+
+        if after is not None:
+            # Row comparison, so the index on (user_id, created_at, id) can
+            # seek straight to the boundary rather than filter after sorting.
+            where.append("(i.created_at, i.id) < (%(cursor_at)s, %(cursor_id)s)")
+            params["cursor_at"], params["cursor_id"] = after
+
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                SELECT i.id::text,
+                       coalesce(nullif(i.parsed_text, ''), i.raw_text) AS text,
+                       i.raw_text,
+                       i.kind::text,
+                       i.state::text,
+                       i.due_at,
+                       i.critical,
+                       i.parse_status::text,
+                       i.audio_path IS NOT NULL AS has_audio,
+                       i.project_id::text,
+                       p.name AS project_name,
+                       i.created_at,
+                       i.state_changed_at
+                  FROM {settings.db_schema}.items i
+                  LEFT JOIN {settings.db_schema}.projects p ON p.id = i.project_id
+                 WHERE {' AND '.join(where)}
+                 ORDER BY i.created_at DESC, i.id DESC
+                 LIMIT %(limit)s
+                """,
+                params,
+            )
+            columns = [c.name for c in result.description or []]
+            rows = [dict(zip(columns, row)) for row in await result.fetchall()]
+
+        has_more = len(rows) > limit
+        return rows[:limit], has_more
+
+    async def list_projects(self, user_id: str) -> list[dict[str, Any]]:
+        """Every project this user has, with how many items sit in each (UC36).
+
+        Returns the count alongside the name because the filter chips are the
+        only place projects are visible at all, and a chip that leads to an
+        empty list is worse than no chip. With UC11 dropped nothing populates
+        `project_id` on its own, so this is normally empty and the chip row
+        does not render — which is the honest depiction of that decision, not
+        a gap.
+
+        Args:
+            user_id: Owner of the projects.
+
+        Returns:
+            Projects with a non-zero item count, busiest first.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                SELECT p.id::text, p.name, p.slug, count(i.id) AS items
+                  FROM {settings.db_schema}.projects p
+                  LEFT JOIN {settings.db_schema}.items i ON i.project_id = p.id
+                 WHERE p.user_id = %s
+                 GROUP BY p.id, p.name, p.slug
+                 ORDER BY count(i.id) DESC, p.name ASC
+                """,
+                (user_id,),
             )
             columns = [c.name for c in result.description or []]
             return [dict(zip(columns, row)) for row in await result.fetchall()]

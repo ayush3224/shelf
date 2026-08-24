@@ -1,5 +1,6 @@
 """Shelf API service."""
 
+import base64
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -12,6 +13,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     Request,
     UploadFile,
     status,
@@ -197,6 +199,63 @@ class TodayResponse(BaseModel):
 
     as_of: datetime
     items: list[TodayItem]
+
+
+class ShelfItem(BaseModel):
+    """One row of the Shelf list (UC33).
+
+    Carries `project_id` and `project_name` because the client groups by
+    project rather than the server sectioning the response: the list is
+    keyset-paginated, so a group can span pages, and a response shaped as
+    sections would have to either break a group at the page boundary or
+    abandon the pagination.
+    """
+
+    id: str
+    text: str
+    raw_text: str
+    kind: str
+    state: str
+    due_at: Optional[datetime] = None
+    critical: bool
+    parse_status: str
+    has_audio: bool = False
+    project_id: Optional[str] = None
+    project_name: Optional[str] = None
+    created_at: datetime
+    state_changed_at: datetime
+
+
+class ShelfResponse(BaseModel):
+    """Response for GET /items — one page of the Shelf.
+
+    `next_cursor` is opaque and is the only thing a caller should use to ask
+    for the next page. It is null exactly when `has_more` is false.
+    """
+
+    items: list[ShelfItem]
+    next_cursor: Optional[str] = None
+    has_more: bool = False
+    states: list[str]
+
+
+class ProjectSummary(BaseModel):
+    """One project, for the filter chips (UC36)."""
+
+    id: str
+    name: str
+    slug: str
+    items: int
+
+
+class ProjectsResponse(BaseModel):
+    """Response for GET /projects.
+
+    Normally empty: UC11 was dropped, so nothing sets `project_id` on its own
+    and a project only exists if one was entered by hand.
+    """
+
+    projects: list[ProjectSummary]
 
 
 class DoneResponse(BaseModel):
@@ -811,6 +870,192 @@ async def items_today(
         as_of=now,
         items=[TodayItem(**row, overdue=row["due_at"] <= now) for row in rows],
     )
+
+
+# Everything not `active`. The Shelf is what `Today` deliberately is not: an
+# archive you go to, rather than a list that comes to you.
+_SHELF_STATES: tuple[str, ...] = ("shelved", "done", "dropped")
+_ALL_STATES: tuple[str, ...] = ("active",) + _SHELF_STATES
+
+#: Shortest search that is worth running. Below this every row matches and the
+#: trigram indexes cannot be used anyway, so it is refused rather than served
+#: slowly and uselessly.
+_MIN_SEARCH_CHARS = 2
+
+#: Page size. Small enough that the first screen arrives immediately, large
+#: enough that a scroll does not fetch on every flick.
+_DEFAULT_PAGE = 30
+_MAX_PAGE = 100
+
+
+def _encode_cursor(created_at: datetime, item_id: str) -> str:
+    """Pack a page boundary into one opaque string.
+
+    Opaque on purpose: it is a keyset, and a client that took it apart and
+    rebuilt it would be depending on the sort order, which is the one thing
+    here that is allowed to change.
+
+    Args:
+        created_at: Capture time of the last row on the page.
+        item_id: Its id, which is what makes the order total.
+
+    Returns:
+        A URL-safe token to hand back as `cursor`.
+    """
+    raw = f"{created_at.isoformat()}|{item_id}".encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> tuple[datetime, str]:
+    """Unpack a cursor produced by `_encode_cursor`.
+
+    Args:
+        cursor: The token from a previous response.
+
+    Returns:
+        The `(created_at, id)` boundary to page after.
+
+    Raises:
+        HTTPException: 400 if the token is not one we issued.
+    """
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        at, _, item_id = base64.urlsafe_b64decode(padded).decode().partition("|")
+        return datetime.fromisoformat(at), str(UUID(item_id))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Bad cursor")
+
+
+@app.get("/items", response_model=ShelfResponse)
+async def browse_items(
+    q: Optional[str] = Query(default=None, description="Search text (UC34)"),
+    state: Optional[list[str]] = Query(
+        default=None, description="States to include; repeatable (UC36)"
+    ),
+    project: Optional[str] = Query(
+        default=None, description="Project id, or 'none' for unsorted (UC36)"
+    ),
+    created_from: Optional[datetime] = Query(
+        default=None, alias="from", description="Earliest capture time, inclusive"
+    ),
+    created_to: Optional[datetime] = Query(
+        default=None, alias="to", description="Latest capture time, exclusive"
+    ),
+    cursor: Optional[str] = Query(default=None, description="From a previous page"),
+    limit: int = Query(default=_DEFAULT_PAGE, ge=1, le=_MAX_PAGE),
+    db: Database = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+) -> ShelfResponse:
+    """Browse, search and filter every item (UC33, UC34, UC36).
+
+    The default with no parameters is the Shelf proper: everything that is not
+    `active`. **A search, though, spans all four states** — you look for a
+    thing you said, and whether it happens to be due today is not something
+    you should have to have guessed before typing. An explicit `state` filter
+    always wins over both defaults, which is what makes the chips able to
+    narrow a search back down.
+
+    Args:
+        q: Substring to look for in the transcript and the parsed description.
+        state: States to include. Repeat the parameter for several.
+        project: A project id, or the literal `none` for items with no project.
+        created_from: Earliest capture time, inclusive.
+        created_to: Latest capture time, exclusive.
+        cursor: Opaque page boundary from the previous response.
+        limit: Page size.
+        db: Database connection.
+        user_id: Authenticated user, from the Supabase token.
+
+    Returns:
+        One page, newest capture first, with a cursor for the next.
+
+    Raises:
+        HTTPException: 400 on an unknown state, an unusable search term, a
+            bad project id or a cursor we did not issue.
+    """
+    # Whitespace is not a short search, it is no search: a box holding a
+    # trailing space after the word was deleted has to fall back to the Shelf
+    # rather than answer 400 at somebody still typing.
+    term = (q.strip() or None) if q else None
+    if term is not None and len(term) < _MIN_SEARCH_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Search for at least {_MIN_SEARCH_CHARS} characters",
+        )
+
+    if state:
+        requested = [s.strip().lower() for s in state if s and s.strip()]
+        unknown = sorted(set(requested) - set(_ALL_STATES))
+        if unknown:
+            raise HTTPException(
+                status_code=400, detail=f"Unknown state: {', '.join(unknown)}"
+            )
+        # Ordered by the canonical list rather than by how they arrived, so
+        # the echo in the response is stable and comparable between requests.
+        states = tuple(s for s in _ALL_STATES if s in set(requested))
+    else:
+        states = _ALL_STATES if term else _SHELF_STATES
+
+    unsorted_only = project is not None and project.lower() == "none"
+    project_id: Optional[str] = None
+    if project and not unsorted_only:
+        try:
+            project_id = str(UUID(project))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Bad project id")
+
+    after = _decode_cursor(cursor) if cursor else None
+
+    try:
+        rows, has_more = await db.browse_items(
+            user_id=user_id,
+            states=states,
+            query=term,
+            project_id=project_id,
+            unsorted_only=unsorted_only,
+            created_from=created_from,
+            created_to=created_to,
+            after=after,
+            limit=limit,
+        )
+    except Exception as e:
+        logger.error("Failed to browse items for user %s: %s", user_id, e)
+        raise HTTPException(status_code=500, detail="Failed to load items")
+
+    return ShelfResponse(
+        items=[ShelfItem(**row) for row in rows],
+        next_cursor=(
+            _encode_cursor(rows[-1]["created_at"], rows[-1]["id"])
+            if has_more and rows
+            else None
+        ),
+        has_more=has_more and bool(rows),
+        states=list(states),
+    )
+
+
+@app.get("/projects", response_model=ProjectsResponse)
+async def list_projects(
+    db: Database = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+) -> ProjectsResponse:
+    """The projects the filter chips are drawn from (UC36).
+
+    Args:
+        db: Database connection.
+        user_id: Authenticated user, from the Supabase token.
+
+    Returns:
+        Every project, busiest first. Empty until one is created by hand —
+        UC11 was dropped, so nothing infers them.
+    """
+    try:
+        rows = await db.list_projects(user_id)
+    except Exception as e:
+        logger.error("Failed to list projects for user %s: %s", user_id, e)
+        raise HTTPException(status_code=500, detail="Failed to load projects")
+
+    return ProjectsResponse(projects=[ProjectSummary(**row) for row in rows])
 
 
 # Declared after `/items/today` on purpose: FastAPI matches in order, and a

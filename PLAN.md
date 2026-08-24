@@ -86,20 +86,40 @@ runs.
 
 ---
 
-## Session 3 — Shelf screen (P0/P1)
+## Session 3 — Shelf screen ✅ *(built 24 August 2026)*
 
 Everything that isn't due, and a way to find it.
 
 - UC33 browse the shelf
 - UC34 text search across all items
 - UC36 filter by state and date range
+- UC20's reactivate button, which finally has somewhere to live
 
 UC33 was written as "grouped by project". With UC11 dropped, `project_id` is
-never populated, so this is a flat list until projects are entered by hand or
-UC11 comes back. Filtering by project goes with it.
+never populated, so the grouping is **built but dormant**: rows carry their
+project, the client sections on it, and with nothing to section the headers do
+not render. Entering a project by hand is all it takes to light it up — and
+`GET /projects` exists so the filter chips appear the moment one does.
+
+Ordering is capture time, not decay time (D38), and paging is keyset from the
+first request (D39). Both were choices about what this screen *is*: an archive
+of what you have said, not a ledger of what the system has taken away from you.
 
 **Exit:** you can find any item you have ever captured in under ten seconds,
 without scrolling `Today`.
+
+*Built and verified against the live database through the running API: a real
+capture landed on the shelf, was found by a word from the middle of it, was
+reactivated over HTTPS with the transition logged as `reactivation`, and was
+deleted again — eight rows before, eight rows after. `pytest -m db` runs the
+browse SQL itself against a real Postgres on its own schema, including the two
+properties that only fail in production: a typed `%` matching itself rather
+than the whole table, and a page boundary that neither repeats nor skips a row
+when a capture lands mid-scroll.*
+
+**Still outstanding:** the same last hop as session 2. None of this has been
+touched on a phone — the screen is verified through the API and under jest, not
+under a thumb.
 
 ---
 

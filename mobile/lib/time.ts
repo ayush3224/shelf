@@ -62,3 +62,25 @@ export function capturedLabel(createdAt: string): string {
   if (Number.isNaN(at.getTime())) return '';
   return `${dateOnly.format(at)}, ${time.format(at)}`;
 }
+
+
+const dayMonth = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short' });
+
+/**
+ * When something was captured, for a Shelf row.
+ *
+ * Deliberately coarse. `Today` says "Yesterday, 3:41 pm" because a due time is
+ * the point of that row; on the Shelf the date is context, not an instruction,
+ * and a clock time there reads as a deadline the item does not have.
+ */
+export function capturedOnLabel(createdAt: string, now: Date = new Date()): string {
+  const at = new Date(createdAt);
+  if (Number.isNaN(at.getTime())) return '';
+
+  const days = Math.round((startOfDay(now) - startOfDay(at)) / 86_400_000);
+  if (days <= 0) return 'Today';
+  if (days === 1) return 'Yesterday';
+  if (days < 7) return `${days} days ago`;
+  if (at.getFullYear() === now.getFullYear()) return dayMonth.format(at);
+  return `${dayMonth.format(at)} ${at.getFullYear()}`;
+}

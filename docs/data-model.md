@@ -54,8 +54,12 @@ The core row. One per captured thing.
 | `created_at` / `updated_at` | timestamptz | |
 
 Indexes: `(user_id, state, due_at)`, `(user_id, state_changed_at)`,
-full-text GIN on `raw_text` for UC34, and `(audio_path)` where non-null —
-that key is how a split's siblings are found.
+trigram GIN on `raw_text` **and on `parsed_text`** for UC34, `(audio_path)`
+where non-null — that key is how a split's siblings are found — and
+`(user_id, created_at desc, id desc)` for the Shelf's keyset paging (migration
+005, D39). The two search indexes are a pair on purpose: `raw_text` is what was
+said and `parsed_text` is what is displayed, and searching one without the
+other silently misses half of what the user is looking at.
 
 ### `transitions`
 Append-only audit of every state change. **This table is how you tune

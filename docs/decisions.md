@@ -406,6 +406,37 @@ one you were demonstrably still thinking about, and throwing it away on the
 evidence to the contrary. Nothing writes to a shelved row on its own, so this
 only ever moves in response to a person.
 
+**D38 — The Shelf is ordered by capture time, not by decay time.**
+UC33's rows are sorted on `created_at` — when you *said* it — rather than on
+`state_changed_at`, when the system last moved it.
+Both were defensible and the tie was broken on what the screen is *for*. Decay
+order puts whatever was most recently taken away from you at the top, which
+makes the Shelf a feed of things the system has been quietly deciding against
+you: a backlog with a running total. Capture order makes it an archive of
+things you have said, which is the reading the screen is supposed to have, and
+it is also the clock a person can actually search against — nobody remembers
+when an item decayed, everybody remembers roughly when they said it. The date
+filter (UC36) bounds the same column for the same reason, so one clock governs
+the whole screen.
+*Consequence:* an item that decayed onto the shelf this morning after being
+captured a year ago sits a year down the list. That is correct here, and the
+place decay is *meant* to become visible is the weekly digest (UC31) — which
+UC22's dropping already made load-bearing.
+
+**D39 — The Shelf pages by keyset, from the first commit.**
+`GET /items` takes an opaque cursor holding the last row's `(created_at, id)`,
+never an offset.
+It was cheap to do now and expensive to retrofit, and offset paging is wrong
+here in a way that shows up as a bug report rather than as slowness: a capture
+landing while you scroll shifts every row down by one, so the item at the page
+boundary is served twice and the one after it is never served at all. The `id`
+in the key is not decoration — a split (UC4) writes several rows in the same
+transaction with the same timestamp, so `created_at` alone is not a total order
+and is exactly where that duplication would happen.
+*Consequence:* there is no "jump to page 7" and no total count, and the screen
+does not offer either. `has_more` comes from fetching one row past the limit
+rather than from a second counting query.
+
 ---
 
 ## Open

@@ -9,7 +9,7 @@ under "Sessions", and move anything that changed into the "Current
 state" table above it. Keep the reasoning, not just the outcome — the
 *why* is the part that's expensive to recover.
 
-Last updated: **23 August 2026**
+Last updated: **24 August 2026**
 
 ---
 
@@ -161,7 +161,7 @@ off-site copy is still worth adding.
 
 | Area | Status |
 |---|---|
-| Schema (`shelf`, 8 tables + view) | ✅ live, migrations 001–004 applied |
+| Schema (`shelf`, 8 tables + view) | ✅ live, migrations 001–005 applied |
 | Audio bucket (`shelf-audio`, private) | ✅ created, unused |
 | API at `https://srv1531684.hstgr.cloud/api` | ✅ live on 443 |
 | systemd service, survives reboot | ✅ verified |
@@ -183,13 +183,15 @@ off-site copy is still worth adding.
 | Audio stored + signed playback (UC7) | ✅ verified live, byte-identical |
 | Cloud transcription (UC8) | ✅ verified live — Groq turbo, 1.6s round trip |
 | Multi-item splitting (UC4) | ⚠️ built, never run against real Haiku |
-| Mobile test suite (jest-expo) | ✅ 97 tests |
-| Backend test suite | ✅ 247 tests, plus 25 opt-in `-m db` on their own schema |
+| Mobile test suite (jest-expo) | ✅ 110 tests |
+| Backend test suite | ✅ 270 tests, plus 46 opt-in `-m db` on their own schema |
 | Native dep tree vs SDK 57 matrix | ✅ reconciled, `expo-doctor` 21/21 |
 | Google OAuth redirect handling | ✅ callback swallowed, not routed |
 | Google OAuth config | ❌ not started |
 | APK on the phone | ❌ not started |
-| Sessions 3-5 | ❌ not started |
+| Shelf screen: browse, search, filter (UC33/34/36) | ✅ verified live through the API |
+| Reactivate reachable from a list (UC20) | ✅ row button + item detail |
+| Sessions 4-5 | ❌ not started |
 
 ## 7. Pending — immediate
 
@@ -1221,3 +1223,83 @@ fixture that *raises*, so forgetting to stub it fails the test instead of
 notifying somebody. Verified afterwards: only the `shelf` schema exists, the
 token is live, and all eight items and the single notification row are as they
 were.
+
+### 24 August 2026 — session 3, the shelf screen
+
+`Today` was the only list the app had, and it is bounded on purpose: due and
+overdue, nothing else. Everything captured without a time went straight to a
+state with no screen attached to it. Eight items in the database, six of them
+shelved, and **no way to see any of them** — which also meant that reactivate
+(UC20), built and working in the API since session 2, was reachable only from
+an item detail you could only open from `Today`. An item on the shelf had no
+route in and therefore no route back.
+
+**What the screen had to not be.** The obvious build is a backlog: everything
+you have not done, oldest first, with a count on the tab. That is the shape
+this project exists to avoid — the whole design bet is that silence is a
+decision and the system is supposed to absorb it rather than hand it back as
+guilt. So the constraints came first and the features second. Newest capture
+first, not oldest. States named in the same grey as the date, so `shelved` does
+not read as worse than `done`. No colour anywhere that means urgency. And the
+item count appears **only once you have typed or tapped a filter** — a number
+that answers a question you asked, never a running total of what you owe.
+
+Two orderings were genuinely arguable and the choice is D38. Sorting on
+`state_changed_at` puts whatever the system most recently took away from you at
+the top, which is a decay feed; sorting on `created_at` makes it an archive of
+things you said. Capture time also happens to be the clock a person can search
+against — nobody remembers when an item decayed, everybody remembers roughly
+when they said it — so the date filter bounds the same column and one clock
+governs the whole screen.
+
+**Paging is keyset from the first commit (D39)**, because this table only
+grows and the retrofit is expensive. An offset would have been three characters
+shorter and wrong in a way that surfaces as a bug report rather than as
+slowness: a capture landing while you scroll shifts every row down one, so the
+item at the page boundary is served twice and the next is never served at all.
+The `id` in the cursor is load-bearing rather than decorative — a split (UC4)
+writes several rows in one transaction with the same timestamp, so `created_at`
+alone is not a total order, and that is precisely where the duplication would
+have happened. Both properties are now tests that run against a real Postgres.
+
+**The index that was missing.** UC34 searches what was said *and* what is
+displayed. Migration 001 put a trigram GIN on `raw_text`; migration 002 then
+added `parsed_text` and gave it nothing, so half of every search — the half
+actually on screen — was a sequential scan waiting for the table to get big
+enough to notice. Migration 005 adds it, plus the browse index. The planner
+confirms both: the browse query is an index-only scan with the cursor as an
+index condition, and with that btree taken away the search becomes a `BitmapOr`
+across the two trigram indexes, which is the shape it will use once there is
+enough data to prefer it.
+
+**Grouping by project is built and dormant, and that is the honest state.**
+UC33 was written as "grouped by project" and UC11 — which was to infer the
+project — was dropped, so nothing populates `project_id`. Rather than delete
+the grouping or pretend it works, the rows carry their project, the client
+sections on it, and with one group the headers do not render at all. Sectioning
+is the client's job for a real reason: a group can straddle a page boundary, so
+a response shaped as sections would have to either cut a group or give up
+paging. `GET /projects` returns `[]` today and the chip row stays hidden; enter
+one project by hand and the whole thing lights up.
+
+**Two bugs, both found by tests rather than by reading.** A whitespace-only
+search box answered 400 instead of falling back to the shelf — a trailing space
+left after deleting a word would have thrown an error at somebody mid-type. And
+a typed `%` was an unescaped ILIKE wildcard, so searching for "20% deposit"
+returned the entire table; that one reads as a broken filter rather than as an
+injection, which is exactly why it would have survived review.
+
+**Verified against the live database through the running API, not stubs.** A
+real capture went in and landed `shelved`, appeared at the top of the shelf,
+was found by a word from the middle of its text, was reactivated over HTTPS
+with the transition logged as `reactivation`, dropped out of the shelved-only
+filter, and was deleted. Eight rows before, eight rows after. The reactivate
+was given an explicit future due time rather than the default: `shelf-tick` is
+live on a one-minute tick, and the default puts `due_at` at now, which would
+have sent a real notification to the owner's phone to prove a list filter
+works.
+
+**Still not on a phone.** Same gate as session 2, unmoved. The screen is
+verified through the API and under jest; it has not been under a thumb, and the
+thing it is most likely to be wrong about — whether it *feels* like an archive
+or like a backlog — is not a thing either of those can answer.

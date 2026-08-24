@@ -141,6 +141,38 @@ UC33 (browse) and UC34 (search), both plain SQL with no model call.
 `v_items_query` still exists in migration 001. It is now unused; it costs
 nothing and would be needed again if this ever came back.
 
+## Retrieval (UC33, UC34, UC36)
+
+One endpoint, `GET /items`, behind one screen. Browse, search and filter are
+the same query with different arguments, because they are the same screen with
+different chips pressed — splitting them would mean a search you could not
+narrow, which is a second and worse list.
+
+```
+GET /items?q=&state=&project=&from=&to=&cursor=&limit=
+```
+
+Two defaults, and they deliberately differ:
+
+- **No parameters** → everything that is not `active`. The Shelf is defined by
+  what `Today` already owns.
+- **A search** → *all four* states. You are looking for a thing you said, and
+  whether it happens to be due today is not something you should have had to
+  guess before typing. An explicit `state` beats both, which is what lets a
+  chip narrow a search back down.
+
+Ordered by `created_at desc, id desc` (D38) and paged by an opaque keyset
+cursor over that pair (D39) — never an offset. Search is `ILIKE` over
+`raw_text` and `parsed_text` through the two trigram GIN indexes, escaped so a
+typed `%` is a percent sign rather than the whole table. No model call is
+involved at any point; UC35 was dropped and this is what replaced it.
+
+Grouping by project is done on the device, not in the response. A group can
+straddle a page boundary, so a response shaped as sections would have to either
+cut a group or give up paging. With UC11 dropped nothing populates
+`project_id`, so in practice there is one group, "Unsorted", and the section
+headers do not render at all.
+
 ## People (UC45-47)
 
 `entities` and `links` have been in the schema since migration 001 (D7). The

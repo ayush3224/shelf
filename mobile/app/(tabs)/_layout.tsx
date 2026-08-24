@@ -3,6 +3,10 @@
  *
  * `index` is the capture screen, so the app opens on it and `Today` is one tap
  * away rather than the thing you land in.
+ *
+ * `Shelf` goes last on purpose. It is the archive (UC33) — the place you go
+ * looking for something, not the place anything pushes you toward — and the
+ * tab order is the only ranking of these three screens the app ever states.
  */
 import { Tabs } from 'expo-router';
 
@@ -27,6 +31,7 @@ export default function TabsLayout() {
     >
       <Tabs.Screen name="index" options={{ title: 'Capture' }} />
       <Tabs.Screen name="today" options={{ title: 'Today' }} />
+      <Tabs.Screen name="shelf" options={{ title: 'Shelf' }} />
     </Tabs>
   );
 }
