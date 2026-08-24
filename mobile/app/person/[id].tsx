@@ -27,9 +27,16 @@
  * recoverable — which is precisely what lets the resolution rules stay willing
  * to guess (D45).
  *
- * Only the merge asks first. It is the one that removes a row; a move relocates
- * mentions and can be undone by moving them back, so a dialog in front of it
- * would be ceremony rather than a safeguard.
+ * **A wrong link is also removed from here** (D58). It is the screen where one
+ * gets noticed, and the repair used to live two screens away on item detail.
+ * The item is untouched: this takes it off the page, and linking it back puts
+ * it on again.
+ *
+ * Only the merge asks first — and the one unlink that cannot be undone, which
+ * is the last note on somebody who goes by other names, because removing them
+ * discards those names. A merge removes a row; a move relocates mentions and
+ * can be undone by moving them back; an ordinary unlink is undone by linking
+ * back. Dialogs in front of those would be ceremony rather than safeguards.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -53,10 +60,15 @@ import {
 } from '../../lib/api';
 import type { ItemState, Person, PersonItem } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
-import { applyItemChange, useItemChanges } from '../../lib/itemEvents';
+import {
+  applyItemChange,
+  publishItemChange,
+  useItemChanges,
+} from '../../lib/itemEvents';
 import { PersonPicker } from '../../lib/PersonPicker';
 import { usePlayback } from '../../lib/playback';
 import { capturedOnLabel } from '../../lib/time';
+import { unlinkPerson } from '../../lib/unlinkPerson';
 import { color, radius, space } from '../../lib/theme';
 
 /** Plain words. Nothing on a person page is an alarm. */
@@ -92,6 +104,11 @@ type RowProps = {
   selecting: boolean;
   selected: boolean;
   onToggle: (id: string) => void;
+  /** Whose page this is, for the unlink's label. */
+  personName: string;
+  onUnlink: (id: string) => void;
+  /** Something else on the page is mid-flight; the row waits its turn. */
+  busy: boolean;
 };
 
 function Row({
@@ -103,6 +120,9 @@ function Row({
   selecting,
   selected,
   onToggle,
+  personName,
+  onUnlink,
+  busy,
 }: RowProps) {
   return (
     <View style={[styles.row, selecting && selected && styles.rowSelected]}>
@@ -162,6 +182,26 @@ function Row({
           )}
         </Pressable>
       ) : null}
+
+      {/* The same words as the chip on item detail, because it is the same
+          gesture — and its own target well clear of the row body, which
+          navigates. Gone during a selection, where the row is a checkbox. */}
+      {selecting ? null : (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`Not about ${personName}`}
+          disabled={busy}
+          hitSlop={10}
+          onPress={() => onUnlink(item.id)}
+          style={({ pressed }) => [
+            styles.unlink,
+            pressed && styles.unlinkPressed,
+            busy && styles.dimmed,
+          ]}
+        >
+          <Text style={styles.unlinkGlyph}>×</Text>
+        </Pressable>
+      )}
     </View>
   );
 }
@@ -387,6 +427,43 @@ export default function PersonScreen() {
     [id, selection, load, failed],
   );
 
+  /**
+   * Take one item off this page (UC45, D58).
+   *
+   * No dialog: the item, its words and its recording are untouched, and adding
+   * the link back on item detail undoes it. `unlinkPerson` puts up the one
+   * question there is — the last note on somebody who goes by other names,
+   * where removing them discards names the owner taught the app — and the
+   * server is what insists on it, so a stale count here cannot skip it.
+   */
+  const unlink = useCallback(
+    async (itemId: string) => {
+      if (!who || busy) return;
+      setBusy(true);
+      setError(null);
+      setNotice(null);
+      try {
+        const result = await unlinkPerson(itemId, who);
+        if (result === null) return; // Asked, and told no. Nothing changed.
+        // Published rather than filtered by hand: this screen is a listener
+        // like any other, and item detail may be showing the same link.
+        publishItemChange({ type: 'unlinked', id: itemId, entityId: who.id });
+        if (result.person_removed) {
+          // That was the last one. This page is now a 404 waiting to happen.
+          router.back();
+          return;
+        }
+        setWho({ ...who, mentions: Math.max(0, who.mentions - 1) });
+        setNotice('Off this page. What you said is untouched.');
+      } catch (e) {
+        await failed(e, 'Could not remove that link.');
+      } finally {
+        setBusy(false);
+      }
+    },
+    [who, busy, failed],
+  );
+
   if (loading) {
     return (
       <SafeAreaView style={styles.centered} edges={['top', 'left', 'right']}>
@@ -494,6 +571,9 @@ export default function PersonScreen() {
             selecting={selecting}
             selected={selection?.has(item.id) ?? false}
             onToggle={toggle}
+            personName={who?.name ?? 'them'}
+            onUnlink={(itemId) => void unlink(itemId)}
+            busy={busy}
           />
         )}
         contentContainerStyle={items.length === 0 ? styles.emptyWrap : styles.list}
@@ -634,6 +714,17 @@ const styles = StyleSheet.create({
   },
   playPressed: { opacity: 0.7 },
   playGlyph: { fontSize: 13, color: color.text },
+  // Deliberately quieter than the play button: it is a correction, not an
+  // action the page is for.
+  unlink: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  unlinkPressed: { opacity: 0.5, backgroundColor: color.border },
+  unlinkGlyph: { fontSize: 18, lineHeight: 20, color: color.faint },
   footer: { paddingVertical: space.md },
   emptyWrap: { flexGrow: 1 },
   empty: {

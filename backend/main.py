@@ -117,11 +117,17 @@ class AudioUrlResponse(BaseModel):
 
 
 class LinkedPerson(BaseModel):
-    """One person an item is linked to (UC45)."""
+    """One person an item is linked to (UC45).
+
+    `aliases` is here so an unlink can say what removing them would cost. It is
+    the record of resolutions that came out right, and the only part of a link
+    removal that relinking does not undo (D58).
+    """
 
     id: str
     name: str
     type: str
+    aliases: list[str] = Field(default_factory=list)
 
 
 class ItemDetail(BaseModel):
@@ -1811,17 +1817,24 @@ async def add_item_person(
 async def remove_item_person(
     item_id: UUID,
     entity_id: UUID,
+    remove_person: bool = False,
     db: Database = Depends(get_db),
     user_id: str = Depends(current_user_id),
 ) -> ItemPeopleResponse:
     """Detach an item from a person by hand (UC45, D45).
 
     The person goes with their last link, the same rule a split follows
-    (UC49) — a name with nothing behind it is clutter rather than data.
+    (UC49) — a name with nothing behind it is clutter rather than data. Not if
+    they go by other names, though: that is a record the owner built by
+    correcting, and it does not come back. Emptying one of those answers 409
+    rather than doing it, and `remove_person` is the client saying it asked
+    (D58).
 
     Args:
         item_id: The item.
         entity_id: Who to detach.
+        remove_person: Confirmation that a person this empties may be removed
+            along with the names they go by.
         db: Database connection.
         user_id: Authenticated user, from the Supabase token.
 
@@ -1829,16 +1842,29 @@ async def remove_item_person(
         Everyone the item is linked to afterwards.
 
     Raises:
-        HTTPException: 404 if there was no such link.
+        HTTPException: 404 if there was no such link, 409 if removing it would
+            discard an alias-bearing person and nobody has agreed to that.
     """
     try:
-        removed = await db.unlink_person(user_id, str(item_id), str(entity_id))
+        removed = await db.unlink_person(
+            user_id, str(item_id), str(entity_id), remove_person=remove_person
+        )
     except Exception as e:
         logger.error("Failed to unlink %s from item %s: %s", entity_id, item_id, e)
         raise HTTPException(status_code=500, detail="Failed to remove that link")
 
     if removed is None:
         raise HTTPException(status_code=404, detail="No such link")
+
+    if removed["blocked"]:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"That is the last thing on {removed['name']}'s page, and they"
+                f" also go by {', '.join(removed['aliases'])}. Repeat with"
+                " remove_person=true to remove them and those names."
+            ),
+        )
 
     people = await db.item_people(str(item_id), user_id)
     return ItemPeopleResponse(

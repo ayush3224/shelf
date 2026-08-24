@@ -171,6 +171,7 @@ off-site copy is still worth adding.
 | Timezone handling (IST) | ✅ tested — "tomorrow 3pm" → 09:30Z |
 | `GET /items/today`, `POST /items/{id}/done` | ✅ live — two blocks since D56: due/overdue, and `Later` |
 | Item detail, edit, move, delete (UC37/38/21/39) | ✅ verified live |
+| Unlink a person, from item detail or the row (UC45, D58) | ⚠️ built and tested; the person-page row not yet pressed on a phone |
 | Scheduler tick (`shelf-tick.timer`, 1 min) | ✅ live under systemd, one log line per tick |
 | Auto-shelve on ignores/snoozes (UC18) | ✅ verified against the real DB and clock |
 | Auto-drop after 90 days (UC19) | ✅ verified by backdating real rows |
@@ -183,8 +184,8 @@ off-site copy is still worth adding.
 | Audio stored + signed playback (UC7) | ✅ verified live, byte-identical |
 | Cloud transcription (UC8) | ✅ verified live — Groq turbo, 1.6s round trip |
 | Multi-item splitting (UC4) | ⚠️ built, never run against real Haiku |
-| Mobile test suite (jest-expo) | ✅ 199 tests, incl. real-tree renders behind a 48dp inset |
-| Backend test suite | ✅ 371 tests, plus 157 opt-in `-m db` on their own schema |
+| Mobile test suite (jest-expo) | ✅ 208 tests, incl. real-tree renders behind a 48dp inset |
+| Backend test suite | ✅ 374 tests, plus 162 opt-in `-m db` on their own schema |
 | Native dep tree vs SDK 57 matrix | ✅ reconciled, `expo-doctor` 21/21 |
 | Google OAuth redirect handling | ✅ callback swallowed, not routed |
 | Google Calendar credential | ✅ service account, calendar shared to it (D52) — no OAuth flow |
@@ -1994,3 +1995,61 @@ the P2 that would have caught it.
 a new section on the one screen whose emptiness is the point, and whether
 "Nothing due. Today is finished." still reads as finished with a block
 underneath it is a thumb question, not an argument.
+
+---
+
+## Session 5c — removing a link from where you notice it *(24 August 2026)*
+
+The owner asked what "removing a note" does on the person page: unlink, or
+delete? The answer was neither — **there was no remove on that page at all**.
+The person page had merge and select-and-move; the only unlink in the app was
+the `×` on a person chip on item detail, and the only delete was item detail's
+own, red and behind a dialog that names the recording. So the dangerous version
+they were checking for did not exist.
+
+The gap was the other way round. **The person page is where a wrong link gets
+noticed** — you open Priya and find something on it that is not about Priya —
+and the repair lived two screens away. It is now on the row, in the same words
+as the chip ("Not about {name}"), and it does not confirm: the item, its words
+and its recording all survive, it stays on the Shelf, and linking it back undoes
+it. Same test a move passes and a merge fails.
+
+**The real find was underneath it.** Unlinking somebody's last note removed the
+person — the rule a split already follows (UC49) — and took their aliases with
+them, silently. Aliases are the residue of resolutions that came out right: a
+bare "Priya" filed onto "Priya Sharma", a name folded in by a merge. Relinking
+the item brings the person back and brings none of that back. D45 lets the
+matching guess *because* the owner can correct it, so discarding the
+corrections without asking spends the licence D45 grants — the next bare "Priya"
+resolves as though the correction never happened.
+
+**Confirm, rather than keep the empty person and delete by hand** (D58). The
+commonest unlink by a distance is the one-mention false positive — a "Pansy"
+who is a cat — so keeping emptied people would fill the people list with exactly
+the rows the unlink was pressed to be rid of, and curating that is admin work to
+keep state accurate, which constraint-level rules forbid. It would also give two
+answers to "what happens to an emptied person", splitting from UC49 for nothing.
+
+**And only where there is something to lose.** No aliases means the row holds
+nothing but a name the next mention recreates, so that removal stays as silent
+as it was. Aliases mean a dialog that names them. That keeps the unlink itself
+free of ceremony and puts the one question precisely on the one irreversible
+case.
+
+**The server decides, not the screen.** The endpoint answers 409 and changes
+nothing rather than emptying an alias-bearing person; `?remove_person=true` is
+the client reporting that it asked. A screen holding a minute-old mention count
+therefore cannot skip the question — a client-side check would have let it. The
+exchange is written once in `lib/unlinkPerson.ts` and both entry points use it,
+which is also why the new dialog reaches item detail's chip for free.
+`LinkedPerson` grew `aliases` so the warning can name what it would discard.
+
+**Tests:** 208 mobile (up 9), 374 backend, 162 `-m db` (up 5) — all green, plus
+`tsc`, `ruff` and `black`. The new cases pin the shape rather than the wording:
+that a 409 becomes a question and not an error, that saying no leaves the link
+where it was, that saying yes repeats the request with the confirmation on it,
+and that a person with no aliases never reaches a dialog at all.
+
+**Not yet on a phone.** Same last hop as everything since session 3. The row now
+carries three targets — body, play, unlink — and whether the × is comfortably
+clear of the row body under a thumb is a thumb question, not an argument.

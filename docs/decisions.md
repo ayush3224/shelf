@@ -805,6 +805,63 @@ sentence the owner reads after every single capture, it has now been wrong
 once, and it was untestable where it was.
 
 
+---
+
+**D58 — An unlink lives on the person page, and it asks exactly once: before
+throwing away the names somebody goes by.**
+*24 August 2026.*
+
+Removing a link was only ever on item detail, as an `×` on a person chip. But
+the page where a wrong link gets *noticed* is the person page — you open Priya
+and find something there that is not about her — and the repair was two screens
+away. It is now on the row, in the same words as the chip ("Not about {name}"),
+because it is the same gesture.
+
+*No confirmation on the unlink itself.* Nothing said is deleted: the item, its
+words and its recording all survive, it stays on the Shelf, and linking it back
+on item detail puts it on the page again. That is the same test a move passes
+and a merge fails, and it gives the same answer — a dialog in front of a
+reversible thing is ceremony.
+
+*Except for one case, and it is a real one.* Emptying a person removes them
+(the rule a split follows, UC49), and removing them takes their aliases with
+them. Those aliases are the record of resolutions that came out right — a bare
+"Priya" filed onto "Priya Sharma", a name folded in by a merge — and relinking
+the item does **not** bring them back. It restores the person; it restores none
+of what the owner taught the app about them.
+
+*Why that is not a small thing.* D45 licenses the automatic matching to guess
+precisely because the owner can correct it. The aliases are what those
+corrections leave behind, so discarding them silently spends the licence D45
+grants: the next bare "Priya" resolves as though the correction never happened.
+Silent decay (UC22, dropped) is a deliberate silence about state the owner can
+still see in the digest. This was a silence about losing something they had
+built, with nowhere it showed up afterwards.
+
+*The alternative was to keep the emptied person and let them be deleted by
+hand.* Rejected. The commonest unlink by a distance is the one-mention false
+positive — a "Pansy" who is a cat — so the people list would fill with exactly
+the rows the unlink was pressed to be rid of, and curating it is admin work to
+keep state accurate, which the design constraints forbid outright. It would
+also give two different answers to "what happens to an emptied person",
+splitting from UC49 for no gain.
+
+*So: ask, and only where there is something to lose.* A person with no aliases
+holds nothing but a name that the next mention recreates, and that removal
+stays silent as it always was. A person who goes by other names gets a dialog
+that names them.
+
+*The server decides, not the screen.* `DELETE /items/{id}/people/{entity_id}`
+answers **409 and changes nothing** rather than emptying an alias-bearing
+person; `?remove_person=true` is the client reporting that it asked. A screen
+holding a mention count from a minute ago therefore cannot skip the question,
+which a client-side check would have allowed. The exchange is written once, in
+`lib/unlinkPerson.ts`, and both entry points use it.
+
+*`LinkedPerson` now carries `aliases`* for the same reason — a dialog that
+cannot name what it is about to discard is not much of a warning.
+
+
 ## Open
 
 **O6 — Correcting a person by hand. CLOSED, 24 August 2026.**

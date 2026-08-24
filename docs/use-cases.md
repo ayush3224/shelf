@@ -94,7 +94,7 @@ than a backfill over every note ever captured (D7).
 
 | ID | Use case | Pri |
 |----|----------|-----|
-| UC45 | Record a capture that names a person; the parse extracts who and links the item to them — **from every capture, not just `person_note`s** (widened by the owner 24 August 2026, D46), and a link can be added or removed by hand on item detail | P1 |
+| UC45 | Record a capture that names a person; the parse extracts who and links the item to them — **from every capture, not just `person_note`s** (widened by the owner 24 August 2026, D46), and a link can be added or removed by hand on item detail **or from the person page itself** (D58) | P1 |
 | UC46 | Person page — every linked item **of any kind**, newest first (was "oldest to newest"; changed by the owner 24 August 2026 — the page is opened to see where things stand, and oldest-first buries that under the history) | P1 |
 | UC47 | Browse and search people | P1 |
 | UC48 | Merge two people — fold one into the other, their name becoming an alias | P1 |
@@ -123,6 +123,15 @@ one value that cannot be both — the links table never asked. The same trade
 follows: a wider net misses in both directions, so the link itself is
 correctable by hand on item detail, which is where you are standing when you
 notice it is wrong.
+
+**And from the person page, which is the other place you notice** (24 August
+2026, D58). A wrong link shows up as something on Priya's page that is not
+about Priya; the repair used to be two screens away. It removes the link and
+nothing else — the item, its words and its recording are untouched, and linking
+back undoes it, so it does not confirm. The single exception is the last note on
+somebody who goes by other names: emptying a person removes them, and their
+aliases are corrections the owner made that relinking does not restore. That
+one asks, and the server refuses it until it has been asked.
 
 ## Integrations
 

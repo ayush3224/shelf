@@ -141,15 +141,32 @@ class StubDb(Database):
         self.people.append(entity)
         return {**entity, "added": True}
 
-    async def unlink_person(self, user_id, item_id, entity_id):
-        self.unlinks.append((item_id, entity_id))
+    async def unlink_person(self, user_id, item_id, entity_id, remove_person=False):
+        self.unlinks.append((item_id, entity_id, remove_person))
         if self.unlink_result != "auto":
             return self.unlink_result
-        before = len(self.people)
-        self.people = [p for p in self.people if p["id"] != entity_id]
-        if len(self.people) == before:
+        going = next((p for p in self.people if p["id"] == entity_id), None)
+        if going is None:
             return None
-        return {"entity_id": entity_id, "person_removed": True}
+        # The stub has one item, so every link it holds is somebody's last.
+        # Whether that may proceed is therefore down to the aliases alone (D58).
+        aliases = list(going.get("aliases") or [])
+        if aliases and not remove_person:
+            return {
+                "entity_id": entity_id,
+                "blocked": True,
+                "person_removed": False,
+                "name": going["name"],
+                "aliases": aliases,
+            }
+        self.people = [p for p in self.people if p["id"] != entity_id]
+        return {
+            "entity_id": entity_id,
+            "blocked": False,
+            "person_removed": True,
+            "name": going["name"],
+            "aliases": aliases,
+        }
 
 
 @pytest.fixture
@@ -367,10 +384,16 @@ def test_delete_requires_a_token(client, db):
 
 
 def test_the_detail_carries_who_the_item_is_linked_to(client, db):
-    db.people = [{"id": "e1", "name": "Priya Sharma", "type": "person"}]
+    db.people = [
+        {"id": "e1", "name": "Priya Sharma", "type": "person", "aliases": ["Priya"]}
+    ]
     body = client.get(f"/items/{ITEM}", headers=auth()).json()
 
-    assert body["people"] == [{"id": "e1", "name": "Priya Sharma", "type": "person"}]
+    # The aliases ride along because the unlink has to be able to name what
+    # removing this person would cost (D58).
+    assert body["people"] == [
+        {"id": "e1", "name": "Priya Sharma", "type": "person", "aliases": ["Priya"]}
+    ]
 
 
 def test_an_item_with_nobody_on_it_says_so_rather_than_omitting_it(client, db):
@@ -469,6 +492,67 @@ def test_a_link_can_be_removed(client, db):
 
     assert response.status_code == 200
     assert response.json()["people"] == []
+    assert response.json()["person_removed"] is True
+
+
+def test_emptying_a_person_who_goes_by_other_names_asks_first(client, db):
+    """The one part of an unlink that relinking does not undo (D58). The link
+    survives the refusal — a 409 here means nothing happened."""
+    db.people = [
+        {
+            "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "name": "Priya Sharma",
+            "type": "person",
+            "aliases": ["Priya", "P"],
+        }
+    ]
+    response = client.delete(
+        f"/items/{ITEM}/people/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        headers=auth(),
+    )
+
+    assert response.status_code == 409
+    assert "Priya, P" in response.json()["detail"]
+    assert len(db.people) == 1
+
+
+def test_confirming_removes_the_person_and_the_names(client, db):
+    db.people = [
+        {
+            "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "name": "Priya Sharma",
+            "type": "person",
+            "aliases": ["Priya"],
+        }
+    ]
+    response = client.delete(
+        f"/items/{ITEM}/people/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        "?remove_person=true",
+        headers=auth(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["person_removed"] is True
+    assert db.unlinks[-1][2] is True
+
+
+def test_a_person_with_no_other_names_goes_without_asking(client, db):
+    """Nothing accumulated on them, and the name comes back with the next
+    mention — so a dialog here would be ceremony."""
+    db.people = [
+        {
+            "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "name": "Pansy",
+            "type": "person",
+            "aliases": [],
+        }
+    ]
+    response = client.delete(
+        f"/items/{ITEM}/people/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        headers=auth(),
+    )
+
+    assert response.status_code == 200
     assert response.json()["person_removed"] is True
 
 

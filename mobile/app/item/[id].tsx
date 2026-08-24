@@ -48,7 +48,6 @@ import {
   editItem,
   item as fetchItem,
   reactivateItem,
-  removeItemPerson,
   setItemState,
   snoozeItem,
 } from '../../lib/api';
@@ -57,6 +56,7 @@ import { useAuth } from '../../lib/auth';
 import { publishItemChange } from '../../lib/itemEvents';
 import { PersonPicker } from '../../lib/PersonPicker';
 import { usePlayback } from '../../lib/playback';
+import { unlinkPerson } from '../../lib/unlinkPerson';
 import { capturedLabel, fullDueLabel } from '../../lib/time';
 import { color, radius, space } from '../../lib/theme';
 
@@ -276,7 +276,13 @@ export default function ItemScreen() {
     [detail, busy, id, failed],
   );
 
-  /** Take it off somebody's page. Nothing said is deleted (UC45, D45). */
+  /**
+   * Take it off somebody's page. Nothing said is deleted (UC45, D45).
+   *
+   * `unlinkPerson` rather than the raw call: emptying somebody who goes by
+   * other names discards those names, which is the one part of this that does
+   * not undo, and it asks before doing it (D58).
+   */
   const removePerson = useCallback(
     async (who: LinkedPerson) => {
       if (!detail || busy) return;
@@ -284,7 +290,8 @@ export default function ItemScreen() {
       setError(null);
       setNotice(null);
       try {
-        const result = await removeItemPerson(id, who.id);
+        const result = await unlinkPerson(id, who);
+        if (result === null) return; // Asked, and told no. Nothing changed.
         setDetail({ ...detail, people: result.people });
         publishItemChange({ type: 'unlinked', id, entityId: who.id });
         setNotice(

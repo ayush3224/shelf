@@ -1237,13 +1237,15 @@ class Database:
                 guessed id cannot read somebody else's links.
 
         Returns:
-            The linked entities, by name.
+            The linked entities, by name, each with the other names they go
+            by — an unlink has to be able to say what removing them would
+            cost, and the alias list is that cost (D58).
         """
         pool = await self._ensure_pool()
         async with pool.connection() as conn:
             result = await conn.execute(
                 f"""
-                SELECT e.id::text, e.name, e.type::text
+                SELECT e.id::text, e.name, e.type::text, e.aliases
                   FROM {settings.db_schema}.links l
                   JOIN {settings.db_schema}.entities e ON e.id = l.entity_id
                   JOIN {settings.db_schema}.items i ON i.id = l.item_id
@@ -1365,7 +1367,11 @@ class Database:
         return {**entity, "added": bool(linked.rowcount)}
 
     async def unlink_person(
-        self, user_id: str, item_id: str, entity_id: str
+        self,
+        user_id: str,
+        item_id: str,
+        entity_id: str,
+        remove_person: bool = False,
     ) -> Optional[dict[str, Any]]:
         """Detach an item from a person by hand.
 
@@ -1379,16 +1385,64 @@ class Database:
         data. Nothing said about them is touched, because by then there is
         nothing said about them.
 
+        **Unless they go by other names** (D58). An alias is the residue of a
+        resolution that came out right — a bare "Priya" filed onto "Priya
+        Sharma", or a name folded in by a merge — and it is the one part of an
+        unlink that relinking the item does not restore. So an unlink that
+        would empty an alias-bearing person refuses instead, and says what it
+        would have destroyed; `remove_person` is the caller reporting that it
+        asked. A person with no aliases holds nothing but a name, which the
+        next mention recreates, so that case still goes without asking.
+
         Args:
             user_id: Owner.
             item_id: The item.
             entity_id: Who to detach.
+            remove_person: Permission to remove a person this would empty even
+                though they go by other names. Ignored in every other case.
 
         Returns:
-            What happened, or None if there was no such link to remove.
+            What happened, `blocked` if it needs asking about first, or None if
+            there was no such link to remove.
         """
         pool = await self._ensure_pool()
         async with pool.connection() as conn:
+            # What the link is attached to, and whether anything else is
+            # holding the person up. Counted *before* the delete, so that the
+            # refusal below can happen without having destroyed anything.
+            found = await conn.execute(
+                f"""
+                SELECT e.name,
+                       e.aliases,
+                       (SELECT count(*)
+                          FROM {settings.db_schema}.links x
+                         WHERE x.entity_id = e.id
+                           AND x.item_id <> l.item_id) AS elsewhere
+                  FROM {settings.db_schema}.links l
+                  JOIN {settings.db_schema}.entities e ON e.id = l.entity_id
+                  JOIN {settings.db_schema}.items i ON i.id = l.item_id
+                 WHERE l.item_id = %(item_id)s
+                   AND l.entity_id = %(entity_id)s
+                   AND i.user_id = %(user_id)s
+                   AND e.user_id = %(user_id)s
+                 LIMIT 1
+                """,
+                {"item_id": item_id, "entity_id": entity_id, "user_id": user_id},
+            )
+            row = await found.fetchone()
+            if row is None:
+                return None
+            name, aliases, elsewhere = row[0], list(row[1] or []), row[2]
+
+            if elsewhere == 0 and aliases and not remove_person:
+                return {
+                    "entity_id": entity_id,
+                    "blocked": True,
+                    "person_removed": False,
+                    "name": name,
+                    "aliases": aliases,
+                }
+
             removed = await conn.execute(
                 f"""
                 DELETE FROM {settings.db_schema}.links l
@@ -1421,7 +1475,13 @@ class Database:
                 )
                 person_removed = True
 
-        return {"entity_id": entity_id, "person_removed": person_removed}
+        return {
+            "entity_id": entity_id,
+            "blocked": False,
+            "person_removed": person_removed,
+            "name": name,
+            "aliases": aliases,
+        }
 
     async def merge_people(
         self, user_id: str, survivor_id: str, absorbed_id: str

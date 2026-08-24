@@ -509,6 +509,14 @@ export type LinkedPerson = {
   id: string;
   name: string;
   type: 'person' | 'org' | 'place';
+  /**
+   * The other names they go by.
+   *
+   * Here so an unlink can say what removing them would cost. Aliases are the
+   * record of resolutions that came out right, and they are the only part of a
+   * link removal that relinking the item does not restore (D58).
+   */
+  aliases: string[];
 };
 
 export type ItemDetail = {
@@ -618,14 +626,22 @@ export function addItemPerson(
  * Nothing said is deleted — this corrects the filing, not the capture. The
  * person goes with their last link, the rule a split already follows (UC49):
  * a name with nothing behind it is clutter rather than data.
+ *
+ * Unless they go by other names, in which case the server answers 409 and
+ * nothing happens until `removePerson` says the owner was asked (D58). Prefer
+ * `unlinkPerson` in `lib/unlinkPerson` to calling this directly — it is that
+ * exchange, written once.
  */
 export function removeItemPerson(
   itemId: string,
   entityId: string,
+  options: { removePerson?: boolean } = {},
 ): Promise<ItemPeopleResponse> {
-  return request<ItemPeopleResponse>(`/items/${itemId}/people/${entityId}`, {
-    method: 'DELETE',
-  });
+  const qs = options.removePerson ? '?remove_person=true' : '';
+  return request<ItemPeopleResponse>(
+    `/items/${itemId}/people/${entityId}${qs}`,
+    { method: 'DELETE' },
+  );
 }
 
 export type DeleteResponse = {
