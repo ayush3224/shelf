@@ -72,7 +72,10 @@ These are non-negotiable; they're why the monthly bill stays under $1.
   path that puts rows in front of the model at all.)
 - **No prompt caching.** Captures are sporadic; the 5-min cache would be
   cold on most calls and you'd pay the write premium for nothing.
-- **Batch API for the weekly digest.** It can wait; it's 50% off.
+- ~~**Batch API for the weekly digest.**~~ Struck 24 August 2026 (D47): the
+  digest turned out to have no model call to batch. It is a report on rows,
+  and the rule above says rows never go to the model — so it is two SQL
+  queries and there is nothing to buy at half price.
 
 ## Conventions
 

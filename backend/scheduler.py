@@ -14,12 +14,15 @@ The tick is one ordered script, and the order is the design:
 4. **Cancel** notifications belonging to items that are no longer `active`.
 5. **Enqueue** a push for everything due with nothing outstanding.
 6. **Send** what is queued.
+7. **Announce the week**, once, on digest day (UC31).
 
 Steps 1-3 run before step 5 so that an item shelving on this tick does not
 also get a fresh push on it. Steps 2 and 3 write to `transitions` and nothing
 else: UC22 was dropped, so decay is **silent** — nothing is pushed, nothing is
 announced, and `transitions` plus the weekly digest (UC31) are the only places
-it is visible at all.
+it is visible at all. Step 7 is that digest, and it is the reason this file
+cares about the calendar at all: everything else here is driven by how long
+something has been waiting, and the digest alone is driven by what day it is.
 
 One property is worth stating plainly, because the whole decay model rests on
 it: **an item is never decayed by a push that did not go out.** `sent_at` is
@@ -33,10 +36,10 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
-from backend import push
+from backend import digest, push
 from backend.config import capture_tz, settings
 from backend.db import Database, close_db, get_db
 
@@ -93,6 +96,8 @@ class TickResult:
     sent: int = 0
     failed: int = 0
     stalled: int = 0
+    digests_built: int = 0
+    digests_sent: int = 0
     survey: Survey = field(default_factory=Survey)
     elapsed_ms: int = 0
 
@@ -108,6 +113,8 @@ class TickResult:
                 self.queued,
                 self.sent,
                 self.failed,
+                self.digests_built,
+                self.digests_sent,
             )
         )
 
@@ -128,7 +135,8 @@ class TickResult:
             f"did[ignored={self.ignored} shelved={self.shelved} "
             f"dropped={self.dropped} cancelled={self.cancelled} "
             f"queued={self.queued} sent={self.sent} "
-            f"failed={self.failed} stalled={self.stalled}] "
+            f"failed={self.failed} stalled={self.stalled} "
+            f"digests={self.digests_built}built/{self.digests_sent}sent] "
             f"{self.elapsed_ms}ms"
         )
 
@@ -685,6 +693,314 @@ async def _send_queued(db: Database) -> tuple[int, int]:
     return (len(accepted), len(failed))
 
 
+# ------------------------------------------------- the weekly digest (UC31)
+#
+# The only step here driven by the calendar rather than by elapsed time, and
+# the only one whose absence is invisible: if pushes stop, you notice within a
+# day; if the digest stops, you notice a month later, having quietly lost the
+# one window onto silent decay. Hence the log line on every path, including
+# the one where there was nothing to say.
+
+
+async def _digest_users(db: Database, period_start: datetime) -> list[str]:
+    """Whose week still needs building.
+
+    Users with a live device and no digest row for this week yet. Two filters
+    doing two jobs: the device is there because a digest that cannot be
+    delivered is not worth computing — and unlike an item reminder it is not
+    worth keeping for later either (`digest.is_stale`) — and the `NOT EXISTS`
+    is there because this runs every minute forever. Asking one indexed
+    question is what keeps the steady-state cost of a weekly feature at one
+    cheap query per tick rather than a full digest build every sixty seconds.
+
+    Args:
+        db: Database.
+        period_start: Start of the week being considered.
+
+    Returns:
+        User ids, usually none.
+    """
+    async with db.connection() as conn:
+        result = await conn.execute(
+            f"""
+            SELECT DISTINCT t.user_id::text
+              FROM {settings.db_schema}.push_tokens t
+             WHERE t.disabled_at IS NULL
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM {settings.db_schema}.digests d
+                    WHERE d.user_id = t.user_id
+                      AND d.period_start = %s
+               )
+            """,
+            (period_start,),
+        )
+        return [row[0] for row in await result.fetchall()]
+
+
+async def _record_digest(
+    db: Database, user_id: str, week: "digest.Digest"
+) -> Optional[str]:
+    """Claim this week for this user, exactly once.
+
+    The unique constraint on `(user_id, period_start)` is what makes the tick
+    idempotent: it runs every minute all Sunday, and every run after the first
+    hits the conflict and does nothing. Doing this in the database rather than
+    with a "have I already?" read is the difference between a rule and a race.
+
+    An empty week is still written down, so that a digest arriving late in the
+    day — because something decayed at noon — cannot happen: the week was
+    already considered and closed.
+
+    Args:
+        db: Database.
+        user_id: Whose week.
+        week: The built digest, for its counts.
+
+    Returns:
+        The new row's id, or None if this week was already claimed.
+    """
+    async with db.connection() as conn:
+        result = await conn.execute(
+            f"""
+            INSERT INTO {settings.db_schema}.digests
+              (user_id, period_start, period_end, shelved, dropped, expiring, empty)
+            VALUES (%(user_id)s, %(start)s, %(end)s,
+                    %(shelved)s, %(dropped)s, %(expiring)s, %(empty)s)
+            ON CONFLICT (user_id, period_start) DO NOTHING
+            RETURNING id::text
+            """,
+            {
+                "user_id": user_id,
+                "start": week.period_start,
+                "end": week.period_end,
+                "shelved": week.shelved_total,
+                "dropped": week.dropped_total,
+                "expiring": week.expiring_total,
+                "empty": week.empty,
+            },
+        )
+        row = await result.fetchone()
+        return row[0] if row else None
+
+
+async def _claim_digests(db: Database) -> list[dict[str, Any]]:
+    """Take the outstanding digests, counting the attempt up front.
+
+    Same shape as `_claim` for item pushes and for the same reason: a crash
+    between "Expo accepted it" and "we wrote that down" costs one attempt
+    rather than looping.
+
+    Args:
+        db: Database.
+
+    Returns:
+        Rows with everything the message needs.
+    """
+    async with db.connection() as conn:
+        result = await conn.execute(
+            f"""
+            WITH claimed AS (
+                SELECT d.id
+                  FROM {settings.db_schema}.digests d
+                 WHERE d.sent_at IS NULL
+                   AND d.empty = false
+                   AND d.attempts < %(max_attempts)s
+                   AND EXISTS (
+                       SELECT 1
+                         FROM {settings.db_schema}.push_tokens t
+                        WHERE t.user_id = d.user_id
+                          AND t.disabled_at IS NULL
+                   )
+                 ORDER BY d.period_end
+            ),
+            bumped AS (
+                UPDATE {settings.db_schema}.digests d
+                   SET attempts = d.attempts + 1
+                  FROM claimed
+                 WHERE d.id = claimed.id
+                RETURNING d.id
+            )
+            SELECT d.id::text AS digest_id,
+                   d.user_id::text AS user_id,
+                   d.period_start,
+                   d.period_end,
+                   d.shelved,
+                   d.dropped,
+                   d.expiring
+              FROM bumped
+              JOIN {settings.db_schema}.digests d ON d.id = bumped.id
+            """,
+            {"max_attempts": settings.digest_max_attempts},
+        )
+        columns = [c.name for c in result.description or []]
+        return [dict(zip(columns, row)) for row in await result.fetchall()]
+
+
+def _digest_body(row: dict[str, Any]) -> str:
+    """The line under the digest's title: the counts, as they were built.
+
+    Args:
+        row: A claimed digest row.
+
+    Returns:
+        One short line.
+    """
+    parts = [
+        (row["shelved"], "shelved"),
+        (row["dropped"], "dropped"),
+        (row["expiring"], "about to drop"),
+    ]
+    return " · ".join(f"{n} {label}" for n, label in parts if n) or "Nothing moved"
+
+
+async def _send_digests(db: Database, now: datetime) -> tuple[int, int]:
+    """Build this week's digest if it is due, and deliver what is outstanding.
+
+    Two halves, deliberately separate. Building claims the week and can only
+    happen once; sending retries. A digest whose send keeps failing is *not*
+    retried forever — past `DIGEST_MAX_AGE_HOURS` it is abandoned, because a
+    summary of last week delivered on Wednesday is not late news, it is wrong
+    news. That is the opposite of the rule for item pushes (D32), and the
+    difference is that a due item is still due whenever the reminder lands.
+
+    Args:
+        db: Database.
+        now: The instant the tick is running at.
+
+    Returns:
+        How many digests were built, and how many were sent.
+    """
+    start, end = digest.period_for(now)
+    built = 0
+
+    # Outside the window there is nothing to build, and saying so before
+    # touching a user is what keeps this a once-a-week feature rather than a
+    # once-a-minute one. Past the window the week is abandoned: the tick was
+    # not running when it ended, and no row is written, so the next digest day
+    # starts clean.
+    for user_id in [] if digest.is_stale(end, now) else await _digest_users(db, start):
+        week = await digest.build(db, user_id, now)
+        digest_id = await _record_digest(db, user_id, week)
+        if digest_id is None:
+            continue
+        built += 1
+        logger.info(
+            "digest for %s week ending %s: %s%s",
+            user_id,
+            week.period_end.date(),
+            week.headline(),
+            " (not sent — nothing to report)" if week.empty else "",
+        )
+
+    claimed = await _claim_digests(db)
+    if not claimed:
+        return (built, 0)
+
+    fresh = [row for row in claimed if not digest.is_stale(row["period_end"], now)]
+    for row in claimed:
+        if row not in fresh:
+            logger.warning(
+                "Abandoning the digest for week ending %s: it is older than "
+                "%sh and a stale summary is worse than none",
+                row["period_end"].date(),
+                settings.digest_max_age_hours,
+            )
+    if not fresh:
+        return (built, 0)
+
+    tokens = await _tokens_for(db, sorted({row["user_id"] for row in fresh}))
+
+    messages: list[push.PushMessage] = []
+    owners: list[str] = []
+    for row in fresh:
+        for token in tokens.get(row["user_id"], []):
+            messages.append(
+                push.PushMessage(
+                    token=token,
+                    title="Your week on the shelf",
+                    body=_digest_body(row),
+                    data={"digest": row["period_start"].date().isoformat()},
+                    channel_id=settings.digest_channel_id,
+                    # No Done and no Snooze: those act on one item and this is
+                    # about several. Tapping it opens the digest.
+                    category_id="",
+                    high_priority=False,
+                )
+            )
+            owners.append(row["digest_id"])
+
+    if not messages:
+        return (built, 0)
+
+    try:
+        tickets = await push.send(messages)
+    except push.PushError as e:
+        logger.error("Push service refused the digest batch: %s", e)
+        await _mark_digest_failed(db, [row["digest_id"] for row in fresh], str(e))
+        return (built, 0)
+
+    accepted: dict[str, Optional[str]] = {}
+    refused: dict[str, str] = {}
+    for digest_id, ticket in zip(owners, tickets):
+        if ticket.ok:
+            accepted.setdefault(digest_id, ticket.ticket_id)
+            continue
+        refused[digest_id] = ticket.message or "refused"
+        if ticket.token_is_dead:
+            await db.disable_push_token(ticket.token, ticket.error or "refused")
+
+    for digest_id, ticket_id in accepted.items():
+        await _mark_digest_sent(db, digest_id, ticket_id)
+    for digest_id in (d for d in refused if d not in accepted):
+        await _mark_digest_failed(db, [digest_id], refused[digest_id])
+        logger.warning("The digest did not go out: %s", refused[digest_id])
+
+    return (built, len(accepted))
+
+
+async def _mark_digest_sent(
+    db: Database, digest_id: str, ticket_id: Optional[str]
+) -> None:
+    """Record that a digest actually left.
+
+    Args:
+        db: Database.
+        digest_id: The row to mark.
+        ticket_id: Expo's receipt id.
+    """
+    async with db.connection() as conn:
+        await conn.execute(
+            f"""
+            UPDATE {settings.db_schema}.digests
+               SET sent_at = now(), ticket_id = %s, last_error = NULL
+             WHERE id = %s
+            """,
+            (ticket_id, digest_id),
+        )
+
+
+async def _mark_digest_failed(db: Database, digest_ids: list[str], error: str) -> None:
+    """Record why a digest did not leave, without marking it sent.
+
+    Args:
+        db: Database.
+        digest_ids: Rows that failed.
+        error: What went wrong.
+    """
+    if not digest_ids:
+        return
+    async with db.connection() as conn:
+        await conn.execute(
+            f"""
+            UPDATE {settings.db_schema}.digests
+               SET last_error = %s
+             WHERE id = ANY(%s::uuid[])
+            """,
+            (error[:500], digest_ids),
+        )
+
+
 # ----------------------------------------------------------------- the tick
 
 
@@ -717,6 +1033,13 @@ async def tick(db: Optional[Database] = None) -> TickResult:
 
     result.sent, result.failed = await _send_queued(db)
     logger.debug("step send: sent=%s failed=%s", result.sent, result.failed)
+
+    result.digests_built, result.digests_sent = await _send_digests(
+        db, datetime.now(timezone.utc)
+    )
+    logger.debug(
+        "step digest: built=%s sent=%s", result.digests_built, result.digests_sent
+    )
 
     result.stalled = await _count_stalled(db)
     result.elapsed_ms = int((time.monotonic() - started) * 1000)

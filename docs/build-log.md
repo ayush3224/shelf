@@ -161,7 +161,7 @@ off-site copy is still worth adding.
 
 | Area | Status |
 |---|---|
-| Schema (`shelf`, 8 tables + view) | ✅ live, migrations 001–005 applied |
+| Schema (`shelf`, 9 tables + view) | ✅ live, migrations 001–006 applied |
 | Audio bucket (`shelf-audio`, private) | ✅ created, unused |
 | API at `https://srv1531684.hstgr.cloud/api` | ✅ live on 443 |
 | systemd service, survives reboot | ✅ verified |
@@ -183,8 +183,8 @@ off-site copy is still worth adding.
 | Audio stored + signed playback (UC7) | ✅ verified live, byte-identical |
 | Cloud transcription (UC8) | ✅ verified live — Groq turbo, 1.6s round trip |
 | Multi-item splitting (UC4) | ⚠️ built, never run against real Haiku |
-| Mobile test suite (jest-expo) | ✅ 139 tests, incl. real-tree renders behind a 48dp inset |
-| Backend test suite | ✅ 305 tests, plus 85 opt-in `-m db` on their own schema |
+| Mobile test suite (jest-expo) | ✅ 166 tests, incl. real-tree renders behind a 48dp inset |
+| Backend test suite | ✅ 340 tests, plus 119 opt-in `-m db` on their own schema |
 | Native dep tree vs SDK 57 matrix | ✅ reconciled, `expo-doctor` 21/21 |
 | Google OAuth redirect handling | ✅ callback swallowed, not routed |
 | Google OAuth config | ❌ not started |
@@ -195,7 +195,10 @@ off-site copy is still worth adding.
 | Reactivate reachable from a list (UC20) | ✅ row button + item detail |
 | People: extract, link, browse, search (UC45/46/47) | ✅ verified live through the API, no migration |
 | Correcting a person by hand (UC48/UC49) | ✅ merge and split, verified live |
-| Session 5 | ❌ not started |
+| Weekly digest — content and screen (UC31) | ✅ verified live through the API, both halves |
+| Weekly digest — the tick's own path (UC31) | ✅ built, claimed and sent once against live rows, push stubbed |
+| A digest notification actually on the phone | ❌ first real one due Sunday 09:00 IST |
+| Session 5 — UC30, UC43, UC14 delivery | ❌ not started |
 
 ## 7. Pending — immediate
 
@@ -1580,3 +1583,141 @@ rule had already made them one, so the merge refused itself and the assertion I
 had written to guard that (`assert survivor != absorbed or True`) was a no-op I
 had typed without reading. The real shape is "Priya Nair" and "Priya N.": two
 names no rule can join, which is exactly the case manual correction exists for.
+
+### 24 August 2026 — session 5 begins: the weekly digest
+
+UC31 is built. It went first in session 5, ahead of the swipe deck and the
+calendar, because it is not the piece that adds the most — it is the piece that
+makes everything already shipped defensible.
+
+**Why this one is load-bearing.** UC22 was dropped on 23 August: decay is
+silent. Nothing announces a shelving as it happens, and the Shelf screen
+deliberately refuses to flag one, because per-row "shelved 3 days ago, by the
+way" would be UC22 through the back door and would turn the archive back into
+a ledger. Which leaves exactly one place decay is visible to a human — this —
+and until today that place did not exist. From the inside, "the system reads
+your silence as an answer" and "the app quietly loses things" were the same
+experience.
+
+**A cost rule turned out to have nothing to buy.** `CLAUDE.md` has said from
+the start: *"Batch API for the weekly digest. It can wait; it's 50% off."*
+Three lines above it, the same list says decay, digests, `Today`, counts and
+search are **all SQL** and no row ever goes in front of the model. Building the
+digest is where those two meet, and only one survives.
+
+The SQL rule won, and not on price. A digest is a report on rows: what
+`transitions` recorded this week, which shelved rows are near their drop date.
+Postgres knows both exactly, and a model handed those rows could only
+paraphrase them — inventing a new way for the digest to be wrong in the one
+place there is no second account to check it against. So there is no model
+call, nothing to batch, and the rule is struck rather than left looking
+unbuilt (D47). Two queries, `max_tokens` unspent.
+
+**Nothing is stored, either.** `shelf.digests` (migration 006) holds the
+delivery record and not one word of content: which weeks were announced,
+whether the push left, how many attempts it took. Both halves are recomputed on
+every `GET /digest`. Two things fall out of that, and the second is the one I
+did not expect to care about:
+
+- The screen is correct **before the first digest ever goes out.** It shipped
+  today; the first notification is Sunday. A stored-content design would have
+  shown an empty page for five days.
+- Re-opening last week's cannot show a stale copy — which matters because the
+  two halves are in **different tenses**. What decayed is history, append-only,
+  and reads the same in a year. What is about to drop is a *forecast* off the
+  shelf as it stands, and a frozen forecast is just a wrong one.
+
+That tense split ended up shaping the screen as much as the schema. "About to
+drop" goes **above** the week's history, because it is the only part anything
+can still be done about, and it carries the one action on the page (Keep).
+Putting the account of decisions already made above the list you can still act
+on would bury the point.
+
+**Idempotence is a constraint, not a code path.** The tick runs every minute
+for the twenty-four hours a digest stays fresh. `unique (user_id,
+period_start)` and `ON CONFLICT DO NOTHING` are what make it announce the week
+once; a "have I already?" `SELECT` would have been a race with the next
+minute's tick. The steady-state cost of a weekly feature is one indexed
+`NOT EXISTS` per tick, because the build is skipped outright unless the week is
+both fresh and unclaimed.
+
+**The rule that inverts D32.** An undelivered item push is kept queued forever
+and never marked sent, because a due item is still due whenever the reminder
+lands. A digest is the opposite: it is a statement about a bounded week, and
+one arriving on Wednesday is not late news, it is *wrong* news — it describes a
+week you are halfway through, and its "about to drop" half may name things that
+have since dropped. So past twenty-four hours the week is abandoned: no row, no
+retry, next digest day starts clean (D48). Same reasoning for a missing device:
+an item push with nowhere to go waits, a digest with nowhere to go is never
+built, because otherwise registering a phone in November would deliver a
+summary of a week in August.
+
+The cost is a real hole and it is written down rather than hidden: a VPS down
+over a weekend loses that week's digest outright. The evidence survives in
+`transitions`, but the prompt to look at it does not. Accepted as the smaller
+failure — a lost digest is one silent week; a late one is a digest you learn
+not to believe.
+
+**An empty week is closed but not sent.** A weekly notification that reliably
+says "nothing happened" is how you teach somebody to swipe the digest away
+unread. The row is still written, with `empty = true`, and that second half is
+not decoration: without it, something decaying at noon on Sunday would produce
+a digest six hours late for a week that had already been accounted for.
+
+**Not a fifth tab** (D49). Four is the ceiling D44 wrote down, and the argument
+that earned People its tab does not transfer: People is a permanent second
+index over the same items, the digest is one screen about one week that you
+open when a notification sends you there. It gets a route. The one in-app way
+in is a quiet "This week" on the Shelf header — the screen that refuses to flag
+decay per row is still exactly where you are standing when you wonder what
+moved.
+
+It also gets its **own notification channel**, at normal priority, with no Done
+and no Snooze. Those buttons act on one item and a digest is about several. The
+channel is separate because the reminder channel is HIGH importance by design,
+and a weekly summary that interrupts like a due item is how the owner ends up
+muting the channel that matters. Two channels means the digest can be turned
+down without turning off reminders. `PushMessage` grew per-message channel,
+category and priority to make that expressible, with `""` meaning *no category*
+as distinct from `None` meaning *the default one* — the kind of distinction
+that is worth two lines of comment because a falsy-check would silently put the
+reminder buttons back on.
+
+**Verified live, both halves.** A real capture through the running API, moved
+onto the shelf with a decay transition inside the week, showed up under
+"Shelved". A row four days from its drop date showed up under "About to drop"
+with a `drops_at` the expiry sweep would agree with — derived from the same
+`greatest(state_changed_at, updated_at)` expression rather than stored, so the
+warning cannot name a date the sweep disagrees with. The tick's own path ran
+against the live schema with the push service stubbed: built once, refused the
+second time by the constraint, one row marked sent, five real devices messaged.
+Test rows deleted afterwards — one item, no digests, no transitions.
+
+**One thing the live run taught me that the tests already knew.** The first
+attempt to set up an expiring row used an `UPDATE` to backdate `updated_at`,
+and the digest reported nothing. `touch_updated_at` is a `BEFORE UPDATE`
+trigger: it had quietly rewritten the timestamp to `now()`, putting the row
+ninety days from dropping. The db suite's helper inserts rather than updates
+for exactly this reason and says so in its docstring, which I had read and not
+absorbed. Worth recording because the failure was silent and looked like a bug
+in the query — the row was simply not old, and nothing said so.
+
+**The DST test is the one that would not have been written from the code.**
+`period_for` builds its answer by combining a date with a wall-clock time
+rather than subtracting seven days from an instant. In `Europe/London` the last
+Sunday of October is twenty-five hours long, so the arithmetic version would
+put the start of the week at 8am — a digest silently covering an extra hour,
+once a year, in a way nobody would ever reproduce. Writing the test also caught
+that two aware datetimes sharing one `tzinfo` subtract as *wall clocks*, which
+reported seven days flat and hid the very hour the test existed for. Both are
+now pinned.
+
+**Still outstanding.** The real Expo round trip for a digest has not happened,
+deliberately: five devices are registered against the live schema and an
+unannounced Monday-morning "your week" push is not one to send on the owner's
+behalf. The first real one is due Sunday at 9am IST, and the exact message that
+will go out has been printed and read. And the same last hop as every session
+before it — none of this has been touched on a phone.
+
+**Session 5 remains open:** UC30 (the weekly review deck), UC43 (Google
+Calendar), and UC14's delivery half.

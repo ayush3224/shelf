@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from psycopg.errors import ForeignKeyViolation
 from pydantic import BaseModel, Field
 
+from backend import digest
 from backend.auth import PUBLIC_PATHS, authenticate, current_user_id
 from backend.config import capture_tz, settings
 from backend.db import Database, close_db, get_db, init_db
@@ -233,6 +234,71 @@ class TodayResponse(BaseModel):
 
     as_of: datetime
     items: list[TodayItem]
+
+
+class DigestItem(BaseModel):
+    """One line of the weekly digest (UC31).
+
+    Deliberately thin. The digest is a list of what happened, and every row on
+    it opens the item, where everything else already is.
+    """
+
+    id: str
+    text: str
+    kind: str
+
+
+class DecayedItem(DigestItem):
+    """Something the system put away by itself during the week.
+
+    `state_now` is separate from the transition on purpose: an item shelved on
+    Tuesday and reactivated on Thursday is still part of what the system did
+    that week, and hiding it would make the digest under-report exactly the
+    cases the decay constants need tuning against (O1, O2).
+    """
+
+    at: datetime
+    state_now: str
+
+
+class ExpiringItem(DigestItem):
+    """Something shelved that is close to being dropped.
+
+    The half of the digest with something to do about it: nothing here has
+    gone yet.
+    """
+
+    untouched_since: datetime
+    drops_at: datetime
+
+
+class DigestResponse(BaseModel):
+    """Response for GET /digest — one week (UC31).
+
+    Two lists with different tenses. `shelved` and `dropped` are history and
+    will read the same in a year; `expiring` is a forecast off the current
+    state of the shelf and moves as soon as anything is touched. `as_of`
+    belongs to the forecast half, `period_start`/`period_end` to the other.
+
+    The `*_total` counts are before truncation, so a section that is showing
+    twenty of forty rows can say so.
+    """
+
+    period_start: datetime
+    period_end: datetime
+    as_of: datetime
+    shelved: list[DecayedItem]
+    dropped: list[DecayedItem]
+    expiring: list[ExpiringItem]
+    shelved_total: int
+    dropped_total: int
+    expiring_total: int
+    warn_days: int
+
+    @property
+    def empty(self) -> bool:
+        """Whether there is nothing at all to report."""
+        return not (self.shelved_total or self.dropped_total or self.expiring_total)
 
 
 class ShelfItem(BaseModel):
@@ -1074,6 +1140,52 @@ async def items_today(
     return TodayResponse(
         as_of=now,
         items=[TodayItem(**row, overdue=row["due_at"] <= now) for row in rows],
+    )
+
+
+@app.get("/digest", response_model=DigestResponse)
+async def weekly_digest(
+    db: Database = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+) -> DigestResponse:
+    """The weekly digest: what decayed, and what is about to drop (UC31).
+
+    Since UC22 was dropped this is the only surface on which silent decay is
+    visible at all, which is what makes the feature load-bearing rather than a
+    nicety — it is the difference between "the system acts on your silence"
+    and "things vanish".
+
+    Computed on every request rather than stored. `shelf.digests` records only
+    that a week was *announced*; the content comes from `transitions` and
+    `items`, so the screen is correct even before the first digest has ever
+    been sent, and re-reading last week's does not show a stale copy of it.
+
+    Args:
+        db: Database connection.
+        user_id: Authenticated user, from the Supabase token.
+
+    Returns:
+        The week that has most recently ended, both halves.
+    """
+    now = datetime.now(capture_tz())
+
+    try:
+        week = await digest.build(db, user_id, now)
+    except Exception as e:
+        logger.error("Failed to build the digest for user %s: %s", user_id, e)
+        raise HTTPException(status_code=500, detail="Failed to load the digest")
+
+    return DigestResponse(
+        period_start=week.period_start,
+        period_end=week.period_end,
+        as_of=week.as_of,
+        shelved=[DecayedItem(**row) for row in week.shelved],
+        dropped=[DecayedItem(**row) for row in week.dropped],
+        expiring=[ExpiringItem(**row) for row in week.expiring],
+        shelved_total=week.shelved_total,
+        dropped_total=week.dropped_total,
+        expiring_total=week.expiring_total,
+        warn_days=settings.digest_warn_days,
     )
 
 

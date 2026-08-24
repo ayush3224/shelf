@@ -84,3 +84,36 @@ export function capturedOnLabel(createdAt: string, now: Date = new Date()): stri
   if (at.getFullYear() === now.getFullYear()) return dayMonth.format(at);
   return `${dayMonth.format(at)} ${at.getFullYear()}`;
 }
+
+/**
+ * The week a digest covers, as one short phrase (UC31).
+ *
+ * `period_end` is exclusive — the digest hour on digest day — so the last day
+ * it actually covers is the one before. Printing the exclusive bound would put
+ * a Sunday on a week that ends on Saturday night, which is the kind of
+ * off-by-one nobody notices and everybody half-distrusts.
+ */
+export function weekLabel(periodStart: string, periodEnd: string): string {
+  const from = new Date(periodStart);
+  const to = new Date(new Date(periodEnd).getTime() - 86_400_000);
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return '';
+  return `${dayMonth.format(from)} – ${dayMonth.format(to)}`;
+}
+
+/**
+ * How long something has left before it is dropped (UC31).
+ *
+ * Rounded **down**, deliberately. This is the only warning there is, so it has
+ * to err towards sounding earlier than the sweep will actually fire: something
+ * with thirty hours left reads as "tomorrow", and a label that said "in 2
+ * days" would be promising time the item does not have.
+ */
+export function dropsInLabel(dropsAt: string, now: Date = new Date()): string {
+  const at = new Date(dropsAt);
+  if (Number.isNaN(at.getTime())) return '';
+
+  const days = Math.floor((at.getTime() - now.getTime()) / 86_400_000);
+  if (days <= 0) return 'Drops today';
+  if (days === 1) return 'Drops tomorrow';
+  return `Drops in ${days} days`;
+}

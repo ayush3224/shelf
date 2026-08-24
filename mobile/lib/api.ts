@@ -323,6 +323,63 @@ export function today(): Promise<TodayResponse> {
   return request<TodayResponse>('/items/today');
 }
 
+// ---------------------------------------------------------- weekly digest
+
+export type DigestItem = {
+  id: string;
+  text: string;
+  kind: 'task' | 'note' | 'person_note';
+};
+
+/** Something the system put away by itself during the week. */
+export type DecayedItem = DigestItem & {
+  /** When the transition happened. */
+  at: string;
+  /**
+   * Where the item is *now*, which is not always where the transition left
+   * it: something shelved on Tuesday and reactivated on Thursday still
+   * belongs in the week's account of what the system did.
+   */
+  state_now: ItemState;
+};
+
+/** Something shelved that is close to being dropped — and still recoverable. */
+export type ExpiringItem = DigestItem & {
+  untouched_since: string;
+  drops_at: string;
+};
+
+/**
+ * One week (UC31).
+ *
+ * Two lists in two different tenses. `shelved` and `dropped` are history and
+ * will read the same in a year. `expiring` is a forecast off the shelf as it
+ * stands at `as_of`, and it moves the moment anything is touched.
+ */
+export type DigestResponse = {
+  period_start: string;
+  period_end: string;
+  as_of: string;
+  shelved: DecayedItem[];
+  dropped: DecayedItem[];
+  expiring: ExpiringItem[];
+  shelved_total: number;
+  dropped_total: number;
+  expiring_total: number;
+  /** How far ahead the warning looks, for the section's own explanation. */
+  warn_days: number;
+};
+
+/**
+ * The week that has most recently ended (UC31).
+ *
+ * Computed server-side on every request rather than stored, so this is
+ * correct before the first digest notification has ever gone out.
+ */
+export function digest(): Promise<DigestResponse> {
+  return request<DigestResponse>('/digest');
+}
+
 // -------------------------------------------------------------- mark done
 
 export type DoneResponse = { id: string; state: string; changed: boolean };

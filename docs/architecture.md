@@ -81,6 +81,9 @@ The order is the design:
    queued ones deleted, delivered ones closed with no response.
 5. **Enqueue.** Everything due with nothing outstanding gets a row.
 6. **Send.** One message per registered device, in one request to Expo.
+7. **Announce the week.** On digest day, once (UC31). The only step driven by
+   the calendar rather than by how long something has been waiting — and the
+   only one whose absence is invisible, so it logs on every path.
 
 Steps 1-3 run before step 5 so an item shelving on this tick does not also get
 a fresh push on it. Ignoring and snoozing feed the same threshold — both are
@@ -97,7 +100,8 @@ UC29 (quiet hours) was dropped too, so nothing suppresses an overnight push.
 cheaper than removing it and re-deriving it if the decision reverses.
 
 With both dropped, the `transitions` table and the weekly digest (UC31) are
-the only places decay is observable at all.
+the only places decay is observable at all. Step 7 is that digest; it costs one
+indexed `NOT EXISTS` on the 10,079 ticks a week when there is nothing to do.
 
 ## Push delivery (UC23, UC15, UC17)
 
@@ -123,6 +127,39 @@ credential at all; talking to FCM directly would mean managing that key twice.
   killed never reaches a listener otherwise.
 - `DeviceNotRegistered` from Expo disables the token; the item is not punished
   for it.
+
+## The weekly digest (UC31)
+
+The only surface on which silent decay is visible at all. UC22 was dropped, the
+Shelf deliberately refuses to flag decayed rows, and the `transitions` table is
+not a screen — so if this is missing, "the system reads your silence as an
+answer" and "the app loses things" are the same experience from the inside.
+
+```
+tick (step 7, digest day) ──▶ shelf.digests row ──▶ Expo (digest channel)
+                                                        │
+GET /digest ◀── recomputed from transitions + items ◀── tap
+```
+
+- **The content is never stored.** Two SQL queries, no model call. What decayed
+  comes from `transitions`, what is about to drop from `items` as they stand.
+  `shelf.digests` records only that a week was announced.
+- **Two tenses, and the screen is ordered by them.** "About to drop" is a
+  forecast, still actionable, and comes first; "shelved" and "dropped" are
+  history and sit under it. The one action on the screen is Keep, on the
+  forecast half, because that is the half anything can still be done about.
+- **Once a week, by constraint.** Unique on `(user_id, period_start)`; the tick
+  runs every minute and the second attempt is refused by the database.
+- **An empty week is closed but not sent.** A weekly "nothing happened" teaches
+  you to swipe the digest away unread. The row is still written, so a decay at
+  noon cannot produce a second digest for a week already accounted for.
+- **A stale digest is abandoned, not sent late** (D48) — the opposite of the
+  rule for item pushes (D32). Past `DIGEST_MAX_AGE_HOURS` the week is dropped:
+  a due item is still due whenever the reminder lands, and a summary of a week
+  you are halfway through is not.
+- **Its own Android channel**, at normal priority and with no Done/Snooze
+  buttons. Sharing the reminder channel would let a weekly summary interrupt
+  like a due item, which is how the channel that matters ends up muted.
 
 ## Delivery tiers
 

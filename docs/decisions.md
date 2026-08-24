@@ -729,3 +729,101 @@ the words is UC39 and a different button.
 *Revisit if:* person pages fill with noise faster than the correction gesture
 can clear it. That would mean the extraction needs a bar to clear, not that
 `kind` should be deciding again.
+
+---
+
+**D47 — The digest is computed on read, and it is SQL, so the Batch API rule
+has nothing to buy.** *24 August 2026.*
+
+`CLAUDE.md` carried a cost rule from the beginning — *"Batch API for the weekly
+digest. It can wait; it's 50% off."* — and, three lines above it, the rule that
+**decay, digests, `Today`, overdue, counts and search are all SQL and no row is
+ever put in front of the model.** Building UC31 is where those two meet, and
+only one of them can be right.
+
+The SQL rule wins, and not on cost grounds. A digest is a report on rows:
+what `transitions` recorded this week, and which shelved rows are near their drop
+date. Postgres knows both exactly. A model given those rows could only
+paraphrase them, and the paraphrase would be a new way for the digest to be
+wrong about what the system did — in the one place the owner has to trust it,
+because UC22 was dropped and there is no second account of decay to check it
+against. So there is no model call, and therefore nothing for the Batch API to
+halve. The rule is struck from `CLAUDE.md` rather than left to look unbuilt.
+
+*Nothing is stored either.* `shelf.digests` holds the delivery record — which
+weeks were announced, and whether the push left — and not one word of content.
+Both halves are recomputed on every `GET /digest`:
+
+- It is correct **before** the first digest ever goes out, which matters more
+  than it sounds: the screen shipped today and the first notification is days
+  away, and a stored-content design would have shown an empty page until then.
+- Re-opening last week's cannot show a stale copy. What decayed is append-only
+  and reads the same forever; what is about to drop is a *forecast*, and a
+  frozen forecast is just a wrong one.
+
+*The cost of recomputing* is two indexed queries on a screen opened weekly. The
+tick pays even less: one `NOT EXISTS` per minute, because the build is skipped
+outright unless the week is both fresh and unclaimed.
+
+*Reopen if:* the digest ever wants prose rather than a list — "you have been
+avoiding anything to do with the accountant" is a genuinely different feature
+and would be a model call, on rows, deliberately.
+
+---
+
+**D48 — A stale digest is abandoned, not delivered late.** *24 August 2026.*
+
+The opposite of the rule for item pushes, and the asymmetry is the point.
+
+D32 keeps an undelivered reminder queued indefinitely and refuses to mark it
+sent, because **a due item is still due whenever the notification lands**. Late
+is worse than on time and far better than never.
+
+A digest is not like that. It is a statement about a bounded week, and one that
+arrives on Wednesday is not late news, it is *wrong* news: it describes a week
+you are already halfway through as though it had just ended, and the "about to
+drop" half may name things that have since dropped. So past
+`DIGEST_MAX_AGE_HOURS` (24) the week is dropped: no row is written, nothing is
+retried, and the next digest day starts clean.
+
+*The same reasoning covers a missing device.* An item push with nowhere to go
+is left queued (D32). A digest with nowhere to go is never built — otherwise
+registering a phone in November would deliver a summary of a week in August.
+
+*The cost is a real hole.* A VPS down over a weekend loses that week's digest
+outright, and with UC22 dropped that is the only account of that week's decay
+there was. The evidence is not lost — `transitions` has it, and `GET /digest`
+would still show it if opened within the window — but the *prompt* to look is.
+Accepted as the smaller failure: a lost digest is one silent week, whereas a
+late one is a digest the owner learns not to believe.
+
+---
+
+**D49 — The digest is a place you are sent, not a place you live.**
+*24 August 2026.*
+
+It gets a route (`/digest`), not a tab. Four tabs is the ceiling written into
+D44, and the argument that earned People its tab does not apply here: People is
+a second *index* over the same items, permanently useful. The digest is one
+screen about one week, and it is opened roughly once a week, by a notification.
+A fifth tab for it would put a weekly errand next to the three things the app
+is actually for.
+
+*The one in-app way in is on the Shelf header,* and that is a considered spot.
+The Shelf refuses to flag decay on its rows — doing so would be UC22 through
+the back door and would turn the archive back into a ledger — but "everything
+else" is exactly where you are standing when you wonder what moved. A quiet
+"This week" link answers the question without the rows having to.
+
+*Its own notification channel, at normal priority, with no buttons.* Done and
+Snooze act on one item and a digest is about several, so the category is
+omitted rather than sent with nothing to act on. The channel is separate
+because the reminder channel is HIGH importance by design (a due item is a
+moment that has arrived) and a weekly summary that interrupts the same way is
+how the owner ends up muting the channel that matters. Two channels means the
+digest can be turned down without turning off reminders.
+
+*The forecast goes above the history.* "About to drop" is the only part of the
+screen anything can still be done about; putting the week's account of what
+already happened above it would bury the one actionable list under a list of
+decisions already made.

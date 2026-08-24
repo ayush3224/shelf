@@ -177,6 +177,33 @@ otherwise by turning up again.
 
 One-way: app → Google. Never merge back.
 
+### `digests` *(UC31, migration 006)*
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | uuid pk | |
+| `user_id` | uuid | |
+| `period_start` / `period_end` | timestamptz | the week covered, half-open |
+| `shelved` / `dropped` / `expiring` | int | the counts as built, for the notification body |
+| `empty` | bool | nothing to report; the row is written, no push goes out |
+| `sent_at` | timestamptz null | null with `empty` false means still outstanding |
+| `attempts` / `last_error` / `ticket_id` | | same send bookkeeping as `notifications` |
+
+Unique on `(user_id, period_start)`. **That constraint is the feature**: the
+tick runs every minute for the twenty-four hours a digest is fresh, and the
+week is announced once because the database refuses the second one — not
+because the code remembers.
+
+**The digest's content is not stored here.** What decayed is already in
+`transitions` and what is about to drop is a property of `items` as they stand;
+both are recomputed on every read of `GET /digest`, so the screen is correct
+before the first digest has ever been sent and cannot show a stale copy of an
+old one. This table records only which weeks were *announced*.
+
+The two halves are in different tenses and it matters: `shelved`/`dropped` are
+history and will read the same in a year, `expiring` is a forecast that moves
+the moment anything is touched. That is why the stored `expiring` count and the
+one on screen can differ — the notification is a snapshot, the screen is live.
+
 ## Config constants
 
 Keep these in one config module, not scattered as literals.
@@ -194,7 +221,12 @@ MAX_PARSE_TOKENS     = 200
 MAX_SPLIT_TOKENS     = 600   # UC4 — the array re-prompt only (D19)
 MAX_SPLIT_ITEMS      = 10
 TRANSCRIPT_CONFIDENCE_FLOOR = 0.5   # below this → needs_review (D22, D27)
-DIGEST_DAY           = "sunday"
+DIGEST_DAY           = "sunday"  # UC31 — with DIGEST_HOUR, when the week ends
+DIGEST_HOUR          = 9         # local, in CAPTURE_TIMEZONE, not the server's UTC
+DIGEST_WARN_DAYS     = 14        # two digest cycles, so nothing drops with one warning
+DIGEST_MAX_AGE_HOURS = 24        # past this a digest is abandoned, not sent late (D48)
+DIGEST_MAX_ATTEMPTS  = 5
+DIGEST_LIST_LIMIT    = 20        # rows per section; the count above it is the true total
 ```
 
 ## Parse contract

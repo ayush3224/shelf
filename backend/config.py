@@ -97,6 +97,32 @@ class Settings(BaseSettings):
     # anything (D32).
     push_max_attempts: int = 5
 
+    # The weekly digest (UC31) — the only surface on which silent decay is
+    # visible at all, since UC22 was dropped. Named by day rather than by
+    # weekday index because that is what `docs/data-model.md` documents and
+    # what somebody editing `.env` would expect to write.
+    digest_day: str = "sunday"
+    # Local hour on that day, in `capture_timezone`. Morning, because the
+    # digest is meant to be read before the week starts rather than filed.
+    digest_hour: int = 9
+    # How far ahead the digest warns that something is about to drop. Two
+    # digest cycles, not one: at seven days an item gets exactly one warning
+    # and a week you did not read it is a week it dropped unannounced.
+    digest_warn_days: int = 14
+    # A digest is a snapshot of a week. If it could not be delivered within
+    # this long of the week ending, it is abandoned rather than sent late —
+    # unlike an item reminder, which is still true whenever it arrives.
+    digest_max_age_hours: int = 24
+    digest_max_attempts: int = 5
+    # How many rows each section of the digest returns. The screen is meant to
+    # be read, not scrolled; past this it says how many more there were.
+    digest_list_limit: int = 20
+    # The digest gets its own Android channel. The reminder channel is HIGH
+    # importance because a due item is a moment that has arrived; a weekly
+    # summary is not, and giving it the same interruption is how the important
+    # channel gets muted.
+    digest_channel_id: str = "digest"
+
     model_config = {
         "env_file": ".env",
         "case_sensitive": False,
@@ -105,6 +131,37 @@ class Settings(BaseSettings):
 
 
 settings = Settings()  # type: ignore
+
+
+#: `datetime.weekday()` indices, so a config typo is caught here rather than
+#: producing a digest on a day nobody expected.
+_WEEKDAYS = {
+    "monday": 0,
+    "tuesday": 1,
+    "wednesday": 2,
+    "thursday": 3,
+    "friday": 4,
+    "saturday": 5,
+    "sunday": 6,
+}
+
+
+def digest_weekday() -> int:
+    """The weekday the digest lands on, as `datetime.weekday()` numbers it.
+
+    Falls back to Sunday on an unrecognised name, and says so. A digest on the
+    wrong day is a nuisance; a digest that never fires because the config did
+    not parse is the failure this project cannot see, because the whole feature
+    is the absence of noise.
+
+    Returns:
+        0 for Monday through 6 for Sunday.
+    """
+    try:
+        return _WEEKDAYS[settings.digest_day.strip().lower()]
+    except KeyError:
+        logger.warning("Unknown DIGEST_DAY %r; using sunday", settings.digest_day)
+        return _WEEKDAYS["sunday"]
 
 
 def capture_tz() -> tzinfo:

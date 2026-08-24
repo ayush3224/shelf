@@ -42,12 +42,27 @@ class PushError(Exception):
 
 @dataclass(frozen=True)
 class PushMessage:
-    """One notification, addressed to one device."""
+    """One notification, addressed to one device.
+
+    The defaults describe a due-item reminder (UC23), which is what almost
+    every message is. The weekly digest (UC31) is the exception and overrides
+    all three: it lands on its own Android channel at normal priority with no
+    action buttons, because it is a summary rather than a moment that has
+    arrived — and a weekly summary that interrupts like a reminder is how the
+    reminder channel ends up muted.
+    """
 
     token: str
     title: str
     body: str
     data: dict[str, str]
+    #: None means "the reminder channel/category from config". An empty
+    #: string means *none at all* — which is how the digest asks for a
+    #: notification with no Done and Snooze buttons on it, since those act on
+    #: an item and a digest is not about one item.
+    channel_id: Optional[str] = None
+    category_id: Optional[str] = None
+    high_priority: bool = True
 
     def payload(self) -> dict[str, Any]:
         """The wire form Expo expects.
@@ -60,18 +75,27 @@ class PushMessage:
         Returns:
             A single Expo push message.
         """
-        return {
+        message: dict[str, Any] = {
             "to": self.token,
             "title": self.title,
             "body": self.body,
             "data": self.data,
             "sound": "default",
-            # The item is due *now*; a batched delivery would arrive after the
-            # moment it is about.
-            "priority": "high",
-            "channelId": settings.push_channel_id,
-            "categoryId": settings.push_category_id,
+            # A due item is due *now*; a batched delivery would arrive after
+            # the moment it is about.
+            "priority": "high" if self.high_priority else "normal",
         }
+        channel = (
+            settings.push_channel_id if self.channel_id is None else self.channel_id
+        )
+        if channel:
+            message["channelId"] = channel
+        category = (
+            settings.push_category_id if self.category_id is None else self.category_id
+        )
+        if category:
+            message["categoryId"] = category
+        return message
 
 
 @dataclass(frozen=True)

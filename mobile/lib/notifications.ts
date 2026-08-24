@@ -34,6 +34,15 @@ import { ApiError, markDone, registerDevice, snoozeItem } from './api';
 /** Names the server also uses. `backend/config.py` holds the other copy. */
 export const REMINDER_CATEGORY = 'shelf.reminder';
 export const ANDROID_CHANNEL_ID = 'reminders';
+/**
+ * The weekly digest gets its own channel (UC31).
+ *
+ * Not a nicety: the reminder channel is HIGH importance because a due item is
+ * a moment that has arrived, and a weekly summary that interrupts the same way
+ * is how the owner ends up muting the channel that matters. Separate channels
+ * mean the digest can be turned down without turning off reminders.
+ */
+export const DIGEST_CHANNEL_ID = 'digest';
 
 export const ACTION_DONE = 'done';
 export const ACTION_SNOOZE = 'snooze';
@@ -114,6 +123,17 @@ export async function configureChannels(): Promise<void> {
       lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
       enableVibrate: true,
     });
+
+    await Notifications.setNotificationChannelAsync(DIGEST_CHANNEL_ID, {
+      name: 'Weekly digest',
+      // DEFAULT, not HIGH: it appears in the shade and waits. Once a week is
+      // the whole point — it is an account of what already happened, and
+      // nothing on it needs answering in the next minute.
+      importance: Notifications.AndroidImportance.DEFAULT,
+      sound: 'default',
+      lockscreenVisibility: Notifications.AndroidNotificationVisibility.PRIVATE,
+      enableVibrate: false,
+    });
   }
 }
 
@@ -167,6 +187,20 @@ export async function registerForPush(): Promise<RegistrationResult> {
 
 // ------------------------------------------------------------- responding
 
+/**
+ * Whether this notification is the weekly digest rather than a reminder.
+ *
+ * Told apart by the payload, not by the channel: a channel is an Android
+ * delivery setting the user is free to change, and routing on something the
+ * user can edit is how a tap ends up on the wrong screen.
+ */
+export function isDigest(response: Notifications.NotificationResponse): boolean {
+  const data = response.notification.request.content.data as
+    | Record<string, unknown>
+    | undefined;
+  return typeof data?.digest === 'string' && !!data.digest;
+}
+
 /** The item a notification is about, or null if the payload is not one of ours. */
 export function itemIdFrom(response: Notifications.NotificationResponse): string | null {
   const data = response.notification.request.content.data as
@@ -195,6 +229,16 @@ export type Outcome =
 export async function respondTo(
   response: Notifications.NotificationResponse,
 ): Promise<Outcome> {
+  // The digest carries no item and no buttons — there is only one thing a tap
+  // on it can mean, and any other action identifier on it is a dismissal.
+  if (isDigest(response)) {
+    if (response.actionIdentifier === Notifications.DEFAULT_ACTION_IDENTIFIER) {
+      router.push('/digest');
+      return { kind: 'opened' };
+    }
+    return { kind: 'ignored' };
+  }
+
   const itemId = itemIdFrom(response);
   if (!itemId) return { kind: 'ignored' };
 

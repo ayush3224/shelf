@@ -388,6 +388,20 @@ export default function Shelf() {
             {cursor ? '+' : ''}
           </Text>
         ) : null}
+        {/* The one pointer to the digest that does not come from a
+            notification (UC31). It belongs here rather than on a row: this
+            screen refuses to flag decay per item, because that would be UC22
+            through the back door, but "everything else" is exactly where you
+            are standing when you wonder what moved. */}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Your week"
+          hitSlop={8}
+          onPress={() => router.push('/digest')}
+          style={({ pressed }) => [styles.weekLink, pressed && styles.chipPressed]}
+        >
+          <Text style={styles.weekLinkText}>This week</Text>
+        </Pressable>
       </View>
 
       <TextInput
@@ -543,6 +557,8 @@ const styles = StyleSheet.create({
   },
   title: { fontSize: 28, fontWeight: '700', color: color.text, letterSpacing: -0.6 },
   count: { fontSize: 16, fontWeight: '600', color: color.faint },
+  weekLink: { marginLeft: 'auto' },
+  weekLinkText: { fontSize: 15, color: color.muted },
   search: {
     marginHorizontal: space.lg,
     marginBottom: space.sm,

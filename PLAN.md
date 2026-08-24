@@ -170,17 +170,46 @@ the owner adjudicates.*
 
 ---
 
-## Session 5 — Review and calendar (P1)
+## Session 5 — Review and calendar (P1) — *in progress*
 
+- UC31 weekly digest of what decayed and what is about to drop ✅ *(built
+  24 August 2026)*
 - UC30 weekly review as a swipe deck — four directions, four states
-- UC31 weekly digest of what decayed and what is about to drop
 - UC43 write timed items to a personal Google Calendar
 - UC14 critical flag from spoken cues *(already parsed; this is the delivery
   half — what `critical` actually changes)*
 
 UC31 carries more weight than it looks. With UC22 dropped, the digest is the
 **only** place decay becomes visible, so it is the thing standing between
-"silence is signal" and "items vanish quietly".
+"silence is signal" and "items vanish quietly". It is built first for that
+reason: it is the piece that makes everything already shipped defensible,
+rather than the piece that adds the most.
+
+*Built with migration 006 and no model call.* The digest is two SQL queries
+recomputed on read; `shelf.digests` stores only which weeks were announced
+(D47), and the `CLAUDE.md` rule about batching it was struck rather than
+implemented, because there turned out to be nothing to batch. The tick gained
+a seventh step, the only one driven by the calendar rather than by how long
+something has waited. Its own route and its own notification channel, not a
+fifth tab (D49); a stale digest is abandoned rather than delivered late, which
+is the opposite of the rule for item pushes and for a stated reason (D48).
+
+*Verified live.* Both halves through the running API over a real capture — a
+decay transition inside the week appearing under "Shelved", a real row four
+days from its drop date appearing under "About to drop" with a `drops_at` the
+expiry sweep would agree with. The tick's own path was exercised against the
+live schema with the push service stubbed: built once, refused the second time
+by the unique constraint, one row marked sent, five devices messaged.
+`pytest -m db` covers the rest against a real Postgres, including the window
+boundaries and the case that matters most — a decay the owner immediately
+undid still counts as part of the week.
+
+**Still outstanding on UC31:** the real Expo round trip. Five devices are
+registered against the live schema and an unannounced Monday "your week" push
+is not one to send on the owner's behalf; the first real one is due the coming
+Sunday at 9am IST, and the message that will go out has been printed and read.
+And the same last hop as every session before it — none of this has been seen
+on a phone.
 
 The calendar is one-way: the app owns the item, the event is a projection.
 Store `google_event_id`, reconcile app → Google only. Never build two-way

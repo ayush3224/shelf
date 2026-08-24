@@ -49,6 +49,10 @@ function RootNavigator() {
             rather than a detour. */}
         <Stack.Screen name="item/[id]" />
         <Stack.Screen name="person/[id]" />
+        {/* The digest is the same kind of thing: somewhere a notification
+            sends you once a week (UC31), not somewhere you live. Four tabs
+            is the ceiling (D44) and this is not the fifth. */}
+        <Stack.Screen name="digest" />
       </Stack.Protected>
       <Stack.Protected guard={!session}>
         <Stack.Screen name="sign-in" />

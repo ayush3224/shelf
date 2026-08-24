@@ -2065,6 +2065,138 @@ class Database:
             row = await result.fetchone()
             return dict(zip(columns, row)) if row else None
 
+    # ------------------------------------------------- weekly digest (UC31)
+    #
+    # Both halves are plain SQL, which is the cost rule (`CLAUDE.md`) and also
+    # the honest design: the digest is a report on rows, and a model asked to
+    # summarise rows can only paraphrase what a query already knows.
+    #
+    # They are two queries rather than one because they are two different
+    # kinds of statement. What decayed is **history** — an append-only fact in
+    # `transitions`, true forever, unchanged by anything that happens next.
+    # What is about to drop is a **forecast** off `items` as they stand right
+    # now, and it moves the moment you touch anything. Joining them would
+    # produce one list whose rows meant two different things.
+
+    async def digest_decayed(
+        self, user_id: str, start: datetime, end: datetime, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """What the system put away by itself during a week (UC31).
+
+        Reads `transitions`, not `items`, and that is the point: an item
+        shelved by decay on Tuesday and reactivated by hand on Thursday still
+        belongs in the week's digest, because the thing being reported is what
+        the system did, not where the item ended up. `state_now` carries the
+        second fact separately.
+
+        `total` counts per reason before the limit, so a truncated section can
+        still say how much it is not showing.
+
+        Args:
+            user_id: Owner of the items.
+            start: Inclusive start of the week.
+            end: Exclusive end of the week.
+            limit: Rows per reason.
+
+        Returns:
+            Newest first, each row carrying `reason` (`decay` or `expiry`) and
+            the `total` for that reason.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                WITH moved AS (
+                    SELECT t.item_id,
+                           t.reason::text AS reason,
+                           t.created_at   AS at,
+                           coalesce(nullif(i.parsed_text, ''), i.raw_text) AS text,
+                           i.kind::text   AS kind,
+                           i.state::text  AS state_now,
+                           count(*) OVER (PARTITION BY t.reason) AS total,
+                           row_number() OVER (
+                               PARTITION BY t.reason ORDER BY t.created_at DESC
+                           ) AS rank
+                      FROM {settings.db_schema}.transitions t
+                      JOIN {settings.db_schema}.items i ON i.id = t.item_id
+                     WHERE i.user_id = %(user_id)s
+                       AND t.reason IN ('decay', 'expiry')
+                       AND t.created_at >= %(start)s
+                       AND t.created_at <  %(end)s
+                )
+                SELECT item_id::text AS id, text, kind, reason, at, state_now, total
+                  FROM moved
+                 WHERE rank <= %(limit)s
+                 ORDER BY at DESC
+                """,
+                {
+                    "user_id": user_id,
+                    "start": start,
+                    "end": end,
+                    "limit": limit,
+                },
+            )
+            columns = [c.name for c in result.description or []]
+            return [dict(zip(columns, row)) for row in await result.fetchall()]
+
+    async def digest_expiring(
+        self, user_id: str, warn_days: int, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Shelved items close enough to `DROP_AFTER_DAYS` to be worth naming.
+
+        The forecast half of the digest, and the half with something to act
+        on: everything here is still recoverable, and reading this list is
+        what makes UC19 a decision rather than an accident.
+
+        "Untouched since" is `greatest(state_changed_at, updated_at)`, the same
+        expression the expiry sweep uses (D37). Deriving the drop date from it
+        here rather than storing one keeps the two from drifting — a warning
+        that names a date the sweep disagrees with is worse than no warning.
+
+        Args:
+            user_id: Owner of the items.
+            warn_days: How far ahead to look.
+            limit: Rows returned.
+
+        Returns:
+            Soonest to drop first, each row carrying `drops_at` and the `total`
+            before the limit.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                WITH shelved AS (
+                    SELECT id,
+                           coalesce(nullif(parsed_text, ''), raw_text) AS text,
+                           kind::text AS kind,
+                           greatest(state_changed_at, updated_at) AS untouched_since,
+                           greatest(state_changed_at, updated_at)
+                             + make_interval(days => %(drop_after)s) AS drops_at
+                      FROM {settings.db_schema}.items
+                     WHERE user_id = %(user_id)s
+                       AND state = 'shelved'
+                ),
+                soon AS (
+                    SELECT *, count(*) OVER () AS total
+                      FROM shelved
+                     WHERE drops_at < now() + make_interval(days => %(warn)s)
+                )
+                SELECT id::text, text, kind, untouched_since, drops_at, total
+                  FROM soon
+                 ORDER BY drops_at ASC
+                 LIMIT %(limit)s
+                """,
+                {
+                    "user_id": user_id,
+                    "drop_after": settings.drop_after_days,
+                    "warn": warn_days,
+                    "limit": limit,
+                },
+            )
+            columns = [c.name for c in result.description or []]
+            return [dict(zip(columns, row)) for row in await result.fetchall()]
+
 
 _db_instance: Optional[Database] = None
 
