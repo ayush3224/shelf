@@ -296,11 +296,32 @@ be built before the manual version has been used.
 
 ## Google Calendar (UC43)
 
-- OAuth via Google, refresh token in Supabase.
-- App writes; Google never writes back.
-- Item created with `due_at` → create event, store `google_event_id`.
-- Item edited → patch event. Item done/dropped → delete event.
-- Reconciliation job nightly for anything with `sync_state = 'error'`.
+One-way, always: the app owns the item and the event is a projection of it
+(D8). Nothing reads Google's copy.
+
+- **A service account** holds a key file on the VPS, and the owner shares the
+  calendar with its address from Google's own sharing UI (D52). No consent
+  screen, no refresh token, no expiry. Scope is `calendar.events` only.
+- **A trigger decides what is out of date.** `items` carries an
+  `after insert or update` trigger that marks `calendar_links` `pending`
+  whenever an item's due time, text or state moves — so the parse, an edit,
+  done, snooze, reactivate, a manual move and the tick's own decay and expiry
+  sweeps are all covered without any of them knowing the calendar exists
+  (D53, migration 007).
+- **The tick reconciles**, as step 8, after the sweeps. Wants an event and has
+  none → create, and store the `google_event_id`. Wants one and has one →
+  patch. Wants none and has one → delete. An idle tick makes no network call
+  at all: it checks for dirty rows before it authenticates.
+- **`active` and `shelved` keep their event; `done` and `dropped` lose it**
+  (D54). Decay is silent, and an event disappearing would not be.
+- **Deleting an item (UC39)** writes its event id to `calendar_deletions` in
+  the same transaction, because the link row cascades away with the item. The
+  tick drains that outbox.
+- **Failures retry** until `GOOGLE_CALENDAR_MAX_ATTEMPTS`, then stall and say
+  so in the log. Touching the item resets the count, so giving up is never
+  permanent. An event deleted by hand in Google is recreated (D55).
+- Events are **transparent** and carry **no Google reminders**: the app is the
+  reminder system (UC23), and these are moments rather than commitments.
 
 ## External services & cost
 
@@ -310,7 +331,7 @@ be built before the manual version has been used.
 | Groq (Whisper STT) | transcription | free tier covers ~20 captures/day — see D20, D24 |
 | Supabase | DB, auth, storage | free tier |
 | Railway | API + cron | ~$5 / month |
-| Google Calendar | UC43 | free |
+| Google Calendar | UC43 | free — service account, one token exchange per non-idle tick |
 | CallMeBot | UC26 | free, or $15/mo dedicated |
 
 The infrastructure costs more than the model. Optimise for build time,

@@ -131,6 +131,16 @@ notice it is wrong.
 | UC43 | Write to personal Google Calendar from the app | P1 |
 | UC44 | Obsidian-style linked network of people and notes | P2 |
 
+**UC43 is built** (24 August 2026) and is one-way by construction (D8). An
+item projects an event while it has a due time and has not ended: `active` and
+`shelved` both keep one, `done` and `dropped` take it down (D54). Nothing is
+ever read back — an event deleted by hand inside Google Calendar is recreated
+on the next tick (D55), and the way to take something off the calendar is to
+complete or drop the item.
+
+UC27 was folded into this and stays folded: a reminder that lands as a calendar
+entry is this, and there is no second delivery tier hiding in it.
+
 ## Dropped scope
 
 Five use cases were dropped on 23 August 2026. All owner decisions, none

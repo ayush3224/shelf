@@ -171,11 +171,40 @@ adding a second one, which would push the same phone twice. It also
 clears `disabled_at` — a token we had written off has just proved
 otherwise by turning up again.
 
-### `calendar_links` *(UC43)*
-`item_id`, `google_event_id`, `calendar_id`, `last_synced_at`,
-`sync_state` (`pending`\|`synced`\|`error`).
+### `calendar_links` *(UC43, migration 007)*
+`item_id` (pk), `google_event_id`, `calendar_id`, `last_synced_at`,
+`sync_state` (`pending`\|`synced`\|`error`), `attempts`, `error_detail`.
 
-One-way: app → Google. Never merge back.
+One-way: app → Google. Never merge back (D8).
+
+A row means *this item has, or should have, an event*. It is written by a
+trigger on `items`, not by the code that changes them (D53): the trigger fires
+when an item's `due_at`, `state`, or display text moves, and only then — an
+update that changed none of the three is not a reason to talk to Google.
+
+`calendar_id` is stored rather than assumed, so changing `GOOGLE_CALENDAR_ID`
+later cannot orphan the events already written to the old calendar. `attempts`
+is reset to zero every time the item is touched, so a row that gave up during
+an outage gets a fresh run at the next edit.
+
+The row is **deleted** once the event is gone and none is wanted, rather than
+kept as a tombstone. An item reactivated with a time gets a new row and a new
+event, which is what "the event is a projection" means.
+
+### `calendar_deletions` *(UC43, migration 007)*
+`id`, `user_id`, `google_event_id`, `calendar_id`, `requested_at`,
+`attempts`, `last_error`. Unique on `(calendar_id, google_event_id)`.
+
+An outbox, and it exists for exactly one case: UC39 erases the item, and
+`calendar_links` cascades with it. A `before delete` trigger copies the event
+id here in the same transaction, and the tick performs the delete. Doing it
+inline in the request would orphan the event the first time Google was
+unreachable.
+
+`user_id` is deliberately **not** a foreign key. These rows are written while
+an item is being deleted, and deleting a user cascades through items to here —
+a reference would either block that or cascade the row away, and the event
+would outlive the only record of it either way.
 
 ### `digests` *(UC31, migration 006)*
 | Column | Type | Notes |

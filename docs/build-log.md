@@ -161,7 +161,7 @@ off-site copy is still worth adding.
 
 | Area | Status |
 |---|---|
-| Schema (`shelf`, 9 tables + view) | ✅ live, migrations 001–006 applied |
+| Schema (`shelf`, 10 tables + view) | ✅ live, migrations 001–007 applied |
 | Audio bucket (`shelf-audio`, private) | ✅ created, unused |
 | API at `https://srv1531684.hstgr.cloud/api` | ✅ live on 443 |
 | systemd service, survives reboot | ✅ verified |
@@ -184,10 +184,10 @@ off-site copy is still worth adding.
 | Cloud transcription (UC8) | ✅ verified live — Groq turbo, 1.6s round trip |
 | Multi-item splitting (UC4) | ⚠️ built, never run against real Haiku |
 | Mobile test suite (jest-expo) | ✅ 182 tests, incl. real-tree renders behind a 48dp inset |
-| Backend test suite | ✅ 341 tests, plus 124 opt-in `-m db` on their own schema |
+| Backend test suite | ✅ 365 tests, plus 151 opt-in `-m db` on their own schema |
 | Native dep tree vs SDK 57 matrix | ✅ reconciled, `expo-doctor` 21/21 |
 | Google OAuth redirect handling | ✅ callback swallowed, not routed |
-| Google OAuth config | ❌ not started |
+| Google Calendar credential | ✅ service account, calendar shared to it (D52) — no OAuth flow |
 | APK on the phone | ❌ not started |
 | Shelf screen: browse, search, filter (UC33/34/36) | ✅ verified live through the API |
 | Tab bar visible on the device | ⚠️ fixed (D41); needs one look at a phone to confirm |
@@ -200,7 +200,9 @@ off-site copy is still worth adding.
 | A swipe threshold chosen with a thumb | ❌ 90px is a guess until the deck is used |
 | Weekly digest — the tick's own path (UC31) | ✅ built, claimed and sent once against live rows, push stubbed |
 | A digest notification actually on the phone | ❌ first real one due Sunday 09:00 IST |
-| Session 5 — UC43 calendar, UC14 delivery | ❌ not started |
+| Calendar write, update, delete (UC43) | ✅ verified end to end against the real calendar through the deployed tick |
+| Calendar sync is trigger-driven | ✅ migration 007; no request path calls Google |
+| Session 5 — UC14 delivery half | ❌ not started |
 
 ## 7. Pending — immediate
 
@@ -1808,3 +1810,103 @@ minutes. Both are thumb questions, and this is the screen where the absence of
 a phone is felt hardest.
 
 **Session 5 remains open:** UC43 (Google Calendar) and UC14's delivery half.
+
+---
+
+## Session 5 (cont.) — the calendar (UC43)
+
+*24 August 2026.*
+
+**The last P1 of session 5, and the first feature in this project whose output
+lives somewhere the owner already looks.** Everything before it put things on
+screens this app owns. A calendar event sits next to real appointments, which
+raises the cost of getting it wrong: a duplicate is noise in the place noise is
+least welcome, and a stale entry is worse than no entry at all.
+
+**The credential is not what the plan said**, and the plan was written for a
+different app. `docs/architecture.md` specified OAuth with a refresh token in
+Supabase, which is correct when there are users to consent. There is one user,
+who owns the calendar and the server both, and for that case the OAuth flow is
+a consent screen, a redirect, a stored token and a six-month expiry in exchange
+for nothing. A service account with the calendar shared to it from Google's own
+sharing UI does the same job: the share *is* the consent, granted and revoked
+where the owner already manages calendar access (D52). The scope is
+`calendar.events`, so the key on the VPS cannot read the calendar's settings or
+its ACL.
+
+**The writing happens in the tick, not in the route.** Calling Google from
+`PATCH /items/{id}` is the obvious implementation and it fails in the ordinary
+case: Google is slow, and now editing an item is slow, for a side effect nobody
+asked for. That is D6's argument — enrichment must never cost the capture —
+applied one layer out, and the tick is already where this project puts work
+that has to survive an outage. Up to sixty seconds of lag, which on a calendar
+is invisible. Step 8 runs *after* the sweeps, so an item the tick drops loses
+its event on the same tick that dropped it.
+
+**A trigger decides what is dirty, and this is the part worth keeping.** An
+item's time, text or state is written from at least eight places — the parse,
+an edit, done, snooze, reactivate, a manual move, and the tick's own decay and
+expiry sweeps. Marking the link `pending` from each of them leaves the calendar
+correct exactly until somebody adds a ninth and forgets, and the failure is
+silent: a missing event is indistinguishable from an item that never had a
+time. So migration 007 puts the decision in the database (D53), the same
+instinct as the unique constraint that makes the digest fire once (D47). The
+trigger compares only the three fields the event is a copy of — without that,
+every push count and every person link would queue a write to Google.
+
+**Deleting an item was the one case the trigger could not reach.** UC39 erases
+the row, `calendar_links` cascades with it, and the `google_event_id` goes too.
+So a `before delete` trigger copies the event id into `calendar_deletions`
+first, in the same transaction, and the tick drains it. The inline alternative
+works until the first time Google is unreachable, and then the event is
+orphaned with nothing left that knows it exists.
+
+**`shelved` keeps its event, and that is a decision rather than an oversight**
+(D54). "Show what is active" is the obvious rule and it is wrong here, because
+decay is silent: UC22 was dropped, so an item shelving says nothing. If the
+event disappeared at the same moment, the owner's only evidence would be an
+appointment that quietly vanished — the exact failure `CLAUDE.md` warns about,
+delivered on the most alarming possible surface. Only `done` and `dropped`
+clear it.
+
+**A test wrote to the owner's real calendar, and that is the honest headline of
+this session.** The tick gained a step that talks to Google, and the db suites
+run ticks — they stubbed the push service, because that was the only external
+service the tick had. One `pytest -m db` run later there was an event called
+"Call the insurance guy" on the owner's actual calendar, created by a fixture,
+pointing at an item id in a schema that no longer existed. It was found by
+listing every event carrying the app's private `shelf_item_id` property and
+deleted by hand.
+
+The guard now lives in `tests/conftest.py` rather than in the calendar suite,
+because the tests that needed protecting were the ones that had never heard of
+the calendar. It has two locks and needed both: clearing `GOOGLE_CALENDAR_ID`
+so the step skips itself, and replacing the client so a call fails loudly. The
+first lock alone was not enough — the calendar suite's own fixture sets a
+calendar id, which quietly undid it, and the second lock is what actually
+caught the mistake in testing. Both are asserted.
+
+**An idle tick makes no network call.** The first live tick with the step wired
+in traded a JWT for an access token and then found nothing to sync, and would
+have done so every minute forever: the tick is a short-lived process, so the
+token cache never survives to a second one. A dirty-row check before
+authenticating took the idle tick from 158ms back to 30ms.
+
+**Verified through the deployed tick, not a script.** An item captured with a
+due time appeared on the calendar on the next tick, transparent and with
+Google's own reminders off; editing its text and time patched the same event
+rather than creating a second; marking it done removed it; deleting the item
+drained its event through the outbox. The test event was deleted and the
+calendar audited afterwards for anything carrying the app's marker — nothing
+left.
+
+**Still unproven:** the calendar has only ever been written to by a script and
+by the tick, never by a finger on the phone, which is the same last hop every
+session before this one ended on. And the backfill in migration 007 was a no-op
+here — the live database holds one item, and none of it timed — so the first
+real test of "everything already captured appears too" has not happened.
+
+**Session 5 has one thing left:** UC14's delivery half — what `critical`
+actually changes, given that it is already parsed and currently changes
+nothing.
+

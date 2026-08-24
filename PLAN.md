@@ -177,7 +177,8 @@ the owner adjudicates.*
   expandable counts)*
 - UC30 weekly review as a swipe deck — four directions, four states ✅ *(built
   24 August 2026)*
-- UC43 write timed items to a personal Google Calendar
+- UC43 write timed items to a personal Google Calendar ✅ *(built and
+  verified against the real calendar 24 August 2026)*
 - UC14 critical flag from spoken cues *(already parsed; this is the delivery
   half — what `critical` actually changes)*
 
@@ -233,10 +234,27 @@ The calendar is one-way: the app owns the item, the event is a projection.
 Store `google_event_id`, reconcile app → Google only. Never build two-way
 merge — it is where this kind of project dies (D8).
 
+*Built with migration 007 and no new request path.* The credential is a
+service account with the calendar shared to it rather than the OAuth flow this
+plan assumed (D52), and the writing happens in the tick rather than in the
+route that changed the item (D53) — so a Google outage costs a retry instead
+of a failed edit. A trigger on `items` decides what is out of date, which is
+what keeps the eight places that change an item's state from each having to
+remember the calendar exists. `shelved` keeps its event; only `done` and
+`dropped` take it down (D54), because decay is silent and an event vanishing
+would not be.
+
+*Verified against the real calendar*, through the deployed tick rather than a
+script: a captured item appeared as an event within one tick, an edit to its
+text and time patched the same event rather than making a second, marking it
+done removed it, and deleting the item drained its event through the outbox.
+The test event was removed and the calendar left with nothing on it.
+
 **Exit:** Sunday review takes under two minutes, and timed items appear in
-the calendar and stay in sync when edited. *The first half is now built and
-bounded so that it can be true; whether it actually is has to be measured with
-a thumb and a real week's worth of cards.*
+the calendar and stay in sync when edited. *The calendar half is now true and
+was measured. The review half is built and bounded so that it can be true;
+whether it actually is has to be measured with a thumb and a real week's worth
+of cards.*
 
 ---
 

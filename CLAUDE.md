@@ -56,7 +56,7 @@ accurate, it is the wrong feature. Push back on it.
 | Push       | `expo-notifications` → Expo push service → FCM (UC23) |
 | STT        | Whisper (`whisper-large-v3-turbo`) on Groq, free tier. On-device `SpeechRecognizer` was dropped — see D20 |
 | Scheduler  | `shelf-tick.timer` — systemd, 1-minute tick on the VPS (D36) |
-| Calendar   | Google Calendar API (OAuth) — session 5 |
+| Calendar   | Google Calendar API — service account, calendar shared to it (UC43, D52). One-way, written by the tick |
 | Voice call | CallMeBot — unscheduled (UC26, P2) |
 
 ## Cost rules (hard)

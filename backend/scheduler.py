@@ -15,9 +15,15 @@ The tick is one ordered script, and the order is the design:
 5. **Enqueue** a push for everything due with nothing outstanding.
 6. **Send** what is queued.
 7. **Announce the week**, once, on digest day (UC31).
+8. **Reconcile the calendar** (UC43): every item whose Google event no longer
+   matches it, in either direction — one that has just gained a due time, one
+   whose text or time was edited, one that has been completed or dropped and
+   whose event should come down.
 
 Steps 1-3 run before step 5 so that an item shelving on this tick does not
-also get a fresh push on it. Steps 2 and 3 write to `transitions` and nothing
+also get a fresh push on it. Step 8 runs last, and after the sweeps for the
+same reason: an item dropped by step 3 should have its event removed on the
+tick that dropped it, not a minute later. Steps 2 and 3 write to `transitions` and nothing
 else: UC22 was dropped, so decay is **silent** — nothing is pushed, nothing is
 announced, and `transitions` plus the weekly digest (UC31) are the only places
 it is visible at all. Step 7 is that digest, and it is the reason this file
@@ -39,7 +45,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from backend import digest, push
+from backend import digest, gcal, push
 from backend.config import capture_tz, settings
 from backend.db import Database, close_db, get_db
 
@@ -73,6 +79,8 @@ class Survey:
     open_pushes_overdue: int = 0
     queued_pushes: int = 0
     devices: int = 0
+    calendar_dirty: int = 0
+    calendar_stalled: int = 0
 
     def summary(self) -> str:
         """The considered half of the log line."""
@@ -80,7 +88,8 @@ class Survey:
             f"active={self.active} due={self.due_now} "
             f"shelved={self.shelved}/{self.shelved_expired}expired "
             f"open={self.open_pushes}/{self.open_pushes_overdue}overdue "
-            f"queued={self.queued_pushes} devices={self.devices}"
+            f"queued={self.queued_pushes} devices={self.devices} "
+            f"cal={self.calendar_dirty}dirty/{self.calendar_stalled}stalled"
         )
 
 
@@ -98,6 +107,9 @@ class TickResult:
     stalled: int = 0
     digests_built: int = 0
     digests_sent: int = 0
+    calendar_written: int = 0
+    calendar_removed: int = 0
+    calendar_failed: int = 0
     survey: Survey = field(default_factory=Survey)
     elapsed_ms: int = 0
 
@@ -115,6 +127,9 @@ class TickResult:
                 self.failed,
                 self.digests_built,
                 self.digests_sent,
+                self.calendar_written,
+                self.calendar_removed,
+                self.calendar_failed,
             )
         )
 
@@ -136,7 +151,9 @@ class TickResult:
             f"dropped={self.dropped} cancelled={self.cancelled} "
             f"queued={self.queued} sent={self.sent} "
             f"failed={self.failed} stalled={self.stalled} "
-            f"digests={self.digests_built}built/{self.digests_sent}sent] "
+            f"digests={self.digests_built}built/{self.digests_sent}sent "
+            f"cal={self.calendar_written}written/{self.calendar_removed}removed"
+            f"/{self.calendar_failed}failed] "
             f"{self.elapsed_ms}ms"
         )
 
@@ -181,9 +198,19 @@ async def _survey(db: Database) -> Survey:
               (SELECT count(*) FROM {settings.db_schema}.notifications
                 WHERE sent_at IS NULL AND responded_at IS NULL) AS queued_pushes,
               (SELECT count(*) FROM {settings.db_schema}.push_tokens
-                WHERE disabled_at IS NULL) AS devices
+                WHERE disabled_at IS NULL) AS devices,
+              (SELECT count(*) FROM {settings.db_schema}.calendar_links
+                WHERE sync_state IN ('pending', 'error')
+                  AND attempts < %(cal_attempts)s) AS calendar_dirty,
+              (SELECT count(*) FROM {settings.db_schema}.calendar_links
+                WHERE sync_state IN ('pending', 'error')
+                  AND attempts >= %(cal_attempts)s) AS calendar_stalled
             """,
-            {"days": settings.drop_after_days, "repeat": settings.push_repeat_minutes},
+            {
+                "days": settings.drop_after_days,
+                "repeat": settings.push_repeat_minutes,
+                "cal_attempts": settings.google_calendar_max_attempts,
+            },
         )
         columns = [c.name for c in result.description or []]
         row = await result.fetchone()
@@ -1001,6 +1028,126 @@ async def _mark_digest_failed(db: Database, digest_ids: list[str], error: str) -
         )
 
 
+# --------------------------------------------------- the calendar (UC43)
+
+# One-way, and this is the only place it happens. The database decides *what*
+# is out of date — a trigger marks a link pending whenever an item's time,
+# text or state moves (migration 007) — and this decides what to do about it.
+# Nothing here reads Google's copy: if they disagree, the item wins (D8).
+
+
+async def _sync_calendar(db: Database) -> tuple[int, int, int]:
+    """Bring the calendar back in line with the items (UC43).
+
+    Three shapes of work, all of them falling out of one question the database
+    already answered — should this item have an event?
+
+    - **Yes, and it has none.** Create one and remember its id.
+    - **Yes, and it has one.** Patch it. The item's time or text has moved.
+    - **No, and it has one.** Take it down: the item was completed, dropped,
+      or had its due time cleared.
+
+    Plus the case the link table cannot hold, because the item is gone: UC39
+    deletes leave their event id in `calendar_deletions` on the way out, and
+    those are drained here too.
+
+    The token is fetched **before** anything is claimed. A claim counts an
+    attempt against every row it takes, and an expired key or a revoked share
+    would otherwise spend the whole backlog's attempts in one tick on a
+    failure that has nothing to do with any individual item.
+
+    Args:
+        db: Database.
+
+    Returns:
+        How many events were written, removed, and failed.
+    """
+    if not gcal.enabled():
+        return 0, 0, 0
+
+    # Nothing to sync is the overwhelmingly common case, and this step is the
+    # only one in the tick that would pay a network round trip to find that
+    # out: the tick is a short-lived process, so the token cache never
+    # survives to a second tick.
+    if not await db.has_calendar_work():
+        return 0, 0, 0
+
+    try:
+        await gcal.access_token()
+    except gcal.CalendarError as e:
+        # Nothing is claimed, so nothing spends an attempt. The log is the
+        # whole point of this branch: a calendar that silently stops syncing
+        # looks exactly like a calendar with nothing to sync.
+        logger.error("calendar: cannot authenticate, skipping this tick: %s", e)
+        return 0, 0, 0
+
+    default_calendar = settings.google_calendar_id
+    written = removed = failed = 0
+
+    for row in await db.claim_calendar_links():
+        item_id = row["item_id"]
+        # The calendar the event actually lives on, which is not necessarily
+        # the configured one: changing GOOGLE_CALENDAR_ID must not orphan the
+        # events already written to the old calendar.
+        target = row["calendar_id"] or default_calendar
+
+        try:
+            if not row["wanted"]:
+                if row["google_event_id"]:
+                    await gcal.delete_event(target, row["google_event_id"])
+                    removed += 1
+                await db.drop_calendar_link(item_id)
+                continue
+
+            event = gcal.CalendarEvent(
+                item_id=item_id,
+                text=row["text"] or "",
+                due_at=row["due_at"],
+                raw_text=row["raw_text"] or "",
+            )
+
+            if row["google_event_id"]:
+                await gcal.patch_event(target, row["google_event_id"], event)
+                await db.mark_calendar_synced(item_id, row["google_event_id"], target)
+            else:
+                event_id = await gcal.create_event(default_calendar, event)
+                await db.mark_calendar_synced(item_id, event_id, default_calendar)
+            written += 1
+
+        except gcal.CalendarError as e:
+            if e.gone:
+                # The event was deleted in Google and the item still wants
+                # one. The app is the source of truth, so it comes back on the
+                # next tick (D8) — the way to take something off the calendar
+                # is to complete or drop the item. `attempts` is deliberately
+                # not reset, so a pathological create/delete loop is bounded.
+                logger.info(
+                    "calendar: event for item %s is gone; recreating next tick",
+                    item_id,
+                )
+                await db.forget_calendar_event(item_id)
+                continue
+
+            failed += 1
+            await db.mark_calendar_failed(item_id, str(e))
+            log = logger.error if not e.retryable else logger.warning
+            log("calendar: item %s did not sync: %s", item_id, e)
+
+    for row in await db.claim_calendar_deletions():
+        try:
+            await gcal.delete_event(row["calendar_id"], row["google_event_id"])
+        except gcal.CalendarError as e:
+            failed += 1
+            await db.fail_calendar_deletion(row["id"], str(e))
+            log = logger.error if not e.retryable else logger.warning
+            log("calendar: event %s not removed: %s", row["google_event_id"], e)
+            continue
+        await db.clear_calendar_deletion(row["id"])
+        removed += 1
+
+    return written, removed, failed
+
+
 # ----------------------------------------------------------------- the tick
 
 
@@ -1041,6 +1188,18 @@ async def tick(db: Optional[Database] = None) -> TickResult:
         "step digest: built=%s sent=%s", result.digests_built, result.digests_sent
     )
 
+    (
+        result.calendar_written,
+        result.calendar_removed,
+        result.calendar_failed,
+    ) = await _sync_calendar(db)
+    logger.debug(
+        "step calendar: written=%s removed=%s failed=%s",
+        result.calendar_written,
+        result.calendar_removed,
+        result.calendar_failed,
+    )
+
     result.stalled = await _count_stalled(db)
     result.elapsed_ms = int((time.monotonic() - started) * 1000)
 
@@ -1075,6 +1234,12 @@ async def run_once() -> TickResult:
             "%s queued pushes have exhausted their attempts and will not be "
             "delivered; nothing will decay from them",
             result.stalled,
+        )
+    if result.survey.calendar_stalled:
+        logger.error(
+            "%s calendar link(s) have exhausted their attempts; those items "
+            "are not on the calendar and will not be until they are edited",
+            result.survey.calendar_stalled,
         )
     if result.undeliverable:
         logger.warning(

@@ -123,6 +123,30 @@ class Settings(BaseSettings):
     # channel gets muted.
     digest_channel_id: str = "digest"
 
+    # Google Calendar (UC43). One-way: timed items are projected onto the
+    # owner's calendar and nothing is ever read back (D8).
+    #
+    # A service account with the calendar shared to it, not the OAuth user
+    # flow (D52) — so the credential is a file on disk and a calendar id,
+    # with no refresh token to store and nothing to re-consent to.
+    google_calendar_key_file: str = "google-calendar-key.json"
+    # The calendar to write to, normally the owner's own address. Empty turns
+    # the whole sync off, which is the right default for a P1 integration: a
+    # deployment without it should tick quietly, not fail every minute.
+    google_calendar_id: str = ""
+    # An item is a moment, not a meeting. Fifteen minutes is long enough to
+    # read on a week view and short enough not to look like a commitment —
+    # and the events are transparent anyway, so they never mark you busy.
+    google_calendar_event_minutes: int = 15
+    # How many links one tick will reconcile. Same reasoning as the push
+    # batch: a first run against a backfill must not become a hundred writes
+    # to Google at once.
+    google_calendar_batch_limit: int = 20
+    # After this many failed syncs the row stops being retried. It is reset
+    # to zero whenever the item is touched again, so giving up is never
+    # permanent — a Google outage costs a stalled row, not a lost event.
+    google_calendar_max_attempts: int = 5
+
     model_config = {
         "env_file": ".env",
         "case_sensitive": False,

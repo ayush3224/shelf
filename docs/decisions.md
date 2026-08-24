@@ -622,6 +622,109 @@ there, on the other page.
 
 ---
 
+---
+
+**D52 — The calendar credential is a service account, not the OAuth user
+flow.** *24 August 2026.*
+
+`docs/architecture.md` originally said "OAuth via Google, refresh token in
+Supabase". That is the right answer for an app with users. This app has one
+user, who owns both the calendar and the server, and for that case the OAuth
+flow is machinery with no payoff: a consent screen to build, a redirect to
+handle, a refresh token to store and re-encrypt, and a token that quietly
+expires if the app goes unused for six months.
+
+Instead the service account holds a key file on the VPS, and the owner shares
+the calendar with the service account's address from Google Calendar's own
+sharing UI ("Make changes to events"). Sharing *is* the consent, granted in
+the place the owner already manages calendar access and revocable from the
+same screen. Nothing expires, nothing is stored per user, and the scope is
+`calendar.events` — the key cannot read the calendar's settings or its ACLs.
+
+The cost is that events are created *by* the service account rather than by
+the owner. On a personal calendar that is invisible; the owner is still the
+organiser, because it is their calendar.
+
+*Revisit if:* a second person ever uses this, which is the same condition as
+the commit-to-`main` rule.
+
+---
+
+**D53 — The calendar is reconciled by the tick, and a database trigger decides
+what needs reconciling.** *24 August 2026.*
+
+Two decisions that only make sense together.
+
+**The tick does the writing, not the request handler.** The obvious
+implementation calls Google from `PATCH /items/{id}` and friends. It fails in
+the ordinary case: Google is slow or down, and now editing an item fails, or
+takes four seconds, for a side effect the owner did not ask about. That is the
+same argument as D6 — enrichment must never cost the capture — and the tick is
+already the place this project puts work that must survive an outage. Retries
+come free, request latency is untouched, and a completed item's event comes
+down on the tick that completed it because step 8 runs after the sweeps. The
+cost is up to sixty seconds of lag, which is invisible on a calendar.
+
+**A trigger decides what is dirty, because eight call sites cannot be trusted
+to.** An item's time, text or state is changed by the parse, an edit, done,
+snooze, reactivate, a manual move, and the tick's own decay and expiry sweeps.
+Marking the link `pending` from each of them means the calendar is correct
+exactly as long as nobody adds a ninth and forgets — and the failure is
+silent, because a missing event looks like an item that never had a time. So
+`migration 007` puts an `after insert or update` trigger on `items` that
+notices when the projection has moved. Same instinct as the unique constraint
+on `digests` (D47): the database enforces it, rather than the code remembering
+to.
+
+The trigger compares only the three fields the event is a copy of. Without
+that check, `updated_at` moving — a person link, a push count — would queue a
+write to Google for nothing.
+
+**The one case a trigger cannot cover is UC39.** Deleting an item cascades the
+link away and takes the `google_event_id` with it, so a `before delete`
+trigger copies the event id into `calendar_deletions` first, in the same
+transaction. The tick drains it. Doing the delete inline instead would work
+until the first time Google was unreachable, and then the event would be
+orphaned with nothing left in the system that knew it existed.
+
+---
+
+**D54 — A shelved item keeps its calendar event. Only `done` and `dropped`
+clear it.** *24 August 2026.*
+
+The obvious rule is "the calendar shows what is active". It is wrong here, and
+for a reason specific to this project: decay is **silent** (UC22 was dropped),
+so an item shelving says nothing. If its event vanished from the calendar at
+the same moment, the owner's only evidence of the shelving would be an
+appointment that quietly disappeared — which is precisely the "things are
+vanishing" failure `CLAUDE.md` warns about, delivered on the one surface where
+it is most alarming.
+
+So the projection is "has a due time and has not ended": `active` and
+`shelved` both keep their event, `done` and `dropped` take it down. A shelved
+item's event is almost always in the past by then, where it reads as history
+rather than as a commitment.
+
+---
+
+**D55 — An event deleted inside Google Calendar comes back.** *24 August
+2026.*
+
+The direct consequence of D8, and worth writing down because it will look like
+a bug the first time it happens. The app never reads Google's state; if a patch
+comes back 404, the honest interpretation is not "the owner wants this gone"
+but "the copy was lost", and the next tick makes a new one.
+
+The alternative — treating a manual deletion as a signal — is a read of
+Google's state by another name, and it is the first step onto the two-way
+merge that D8 exists to refuse. The way to take something off the calendar is
+to complete or drop the item, which is also the only way that leaves the app
+and the calendar agreeing afterwards.
+
+The recreate does not reset `attempts`, so a pathological create-delete loop
+stops after `GOOGLE_CALENDAR_MAX_ATTEMPTS` rather than running forever.
+
+
 ## Open
 
 **O6 — Correcting a person by hand. CLOSED, 24 August 2026.**

@@ -23,6 +23,7 @@ from pathlib import Path
 import psycopg
 import pytest
 
+from backend import gcal
 from backend.config import settings
 
 MIGRATIONS = Path(__file__).resolve().parent.parent / "migrations"
@@ -50,6 +51,34 @@ def _rewritten(sql: str, schema: str) -> str:
     return re.sub(r"\bshelf\.", f"{schema}.", sql).replace(
         "create schema if not exists shelf;", f"create schema if not exists {schema};"
     )
+
+
+@pytest.fixture(autouse=True)
+def never_reaches_google_calendar(monkeypatch):
+    """No test writes to a real Google Calendar (UC43).
+
+    This is autouse and lives here rather than in the calendar suite, because
+    the tests that need protecting are the ones that have never heard of the
+    calendar: `scheduler.tick()` gained a step that talks to Google, and every
+    db test that runs a tick would otherwise put its fixture items on the
+    owner's actual calendar. That is not hypothetical — it happened once, and
+    the event had to be deleted by hand.
+
+    Two locks, because either alone can be undone by a fixture that means
+    well: the calendar id is cleared so the step skips itself, and the calls
+    themselves are replaced with something that refuses loudly. A test that
+    genuinely wants the client back has to say so.
+    """
+    monkeypatch.setattr(settings, "google_calendar_id", "")
+
+    async def refuse(*args, **kwargs):
+        raise AssertionError(
+            "a test tried to reach the real Google Calendar; stub `gcal` "
+            "(see the `calendar` fixture in tests/test_calendar_db.py)"
+        )
+
+    for name in ("create_event", "patch_event", "delete_event", "access_token"):
+        monkeypatch.setattr(gcal, name, refuse)
 
 
 @pytest.fixture(scope="session")

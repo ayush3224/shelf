@@ -2226,6 +2226,269 @@ class Database:
             columns = [c.name for c in result.description or []]
             return [dict(zip(columns, row)) for row in await result.fetchall()]
 
+    # ---------------------------------------------------- calendar (UC43)
+
+    async def has_calendar_work(self) -> bool:
+        """Whether anything is waiting to be written to the calendar.
+
+        Asked before authenticating, and that is the whole point. The tick is
+        a short-lived process, so the access token cache dies with it and
+        every tick would otherwise trade a JWT for a token just to discover
+        there was nothing to sync — 1,440 round trips a day, for nothing.
+        This is a covered index lookup on a table with one row per timed item.
+
+        Returns:
+            True if a link is dirty or an event is queued for removal.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                SELECT EXISTS (
+                    SELECT 1 FROM {settings.db_schema}.calendar_links
+                     WHERE sync_state IN ('pending', 'error')
+                       AND attempts < %(max_attempts)s
+                ) OR EXISTS (
+                    SELECT 1 FROM {settings.db_schema}.calendar_deletions
+                     WHERE attempts < %(max_attempts)s
+                )
+                """,
+                {"max_attempts": settings.google_calendar_max_attempts},
+            )
+            row = await result.fetchone()
+            return bool(row and row[0])
+
+    async def claim_calendar_links(self) -> list[dict[str, Any]]:
+        """Take the next batch of items whose calendar event is out of date.
+
+        The attempt is counted here rather than after the write, for the same
+        reason the push claim does it: a crash between "Google accepted it"
+        and "we wrote that down" should cost one attempt, not loop forever.
+
+        `wanted` is computed by the same SQL function the trigger uses, so the
+        question "should this item have an event" has exactly one answer in
+        the system. A row where `wanted` is false and there is no event id is
+        already correct and simply gets its link removed.
+
+        Returns:
+            Rows carrying the item as it stands and the event as last synced.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                WITH claimed AS (
+                    SELECT l.item_id
+                      FROM {settings.db_schema}.calendar_links l
+                      JOIN {settings.db_schema}.items i ON i.id = l.item_id
+                     WHERE l.sync_state IN ('pending', 'error')
+                       AND l.attempts < %(max_attempts)s
+                     ORDER BY l.last_synced_at ASC NULLS FIRST
+                     LIMIT %(limit)s
+                ),
+                bumped AS (
+                    UPDATE {settings.db_schema}.calendar_links l
+                       SET attempts = l.attempts + 1
+                      FROM claimed
+                     WHERE l.item_id = claimed.item_id
+                    RETURNING l.item_id
+                )
+                SELECT i.id::text      AS item_id,
+                       i.user_id::text AS user_id,
+                       {settings.db_schema}.calendar_summary(
+                           i.parsed_text, i.raw_text) AS text,
+                       i.raw_text,
+                       i.due_at,
+                       i.state::text   AS state,
+                       {settings.db_schema}.calendar_wanted(
+                           i.state, i.due_at) AS wanted,
+                       l.google_event_id,
+                       l.calendar_id
+                  FROM bumped
+                  JOIN {settings.db_schema}.calendar_links l
+                    ON l.item_id = bumped.item_id
+                  JOIN {settings.db_schema}.items i ON i.id = l.item_id
+                """,
+                {
+                    "max_attempts": settings.google_calendar_max_attempts,
+                    "limit": settings.google_calendar_batch_limit,
+                },
+            )
+            columns = [c.name for c in result.description or []]
+            return [dict(zip(columns, row)) for row in await result.fetchall()]
+
+    async def mark_calendar_synced(
+        self, item_id: str, google_event_id: str, calendar_id: str
+    ) -> None:
+        """Record that the calendar now matches the item.
+
+        Attempts go back to zero here as well as on the trigger. A row that
+        needed four goes to get through should not carry those four into the
+        next edit, months later, and stall on the first hiccup.
+
+        Args:
+            item_id: The item.
+            google_event_id: Google's id for its event.
+            calendar_id: The calendar the event is on — stored rather than
+                assumed, so that changing `GOOGLE_CALENDAR_ID` later cannot
+                orphan the events already written to the old one.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            await conn.execute(
+                f"""
+                UPDATE {settings.db_schema}.calendar_links
+                   SET google_event_id = %s,
+                       calendar_id = %s,
+                       sync_state = 'synced',
+                       last_synced_at = now(),
+                       attempts = 0,
+                       error_detail = NULL
+                 WHERE item_id = %s
+                """,
+                (google_event_id, calendar_id, item_id),
+            )
+
+    async def mark_calendar_failed(self, item_id: str, error: str) -> None:
+        """Record why a sync did not happen, leaving it due for another go.
+
+        The row stays claimable — `error` is in the claim's filter — until
+        `attempts` runs out. It is never marked `synced`, so a failed write is
+        never mistaken for a calendar that agrees.
+
+        Args:
+            item_id: The item.
+            error: What went wrong, as the caller saw it.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            await conn.execute(
+                f"""
+                UPDATE {settings.db_schema}.calendar_links
+                   SET sync_state = 'error', error_detail = %s
+                 WHERE item_id = %s
+                """,
+                (error[:500], item_id),
+            )
+
+    async def forget_calendar_event(self, item_id: str) -> None:
+        """Drop the stored event id but keep the row pending.
+
+        For the case where Google says the event is gone but the item still
+        wants one — somebody deleted it in the calendar UI. The app is the
+        source of truth (D8), so the answer is to make a new one on the next
+        tick, not to accept the deletion. Removing an item from the calendar
+        is done by completing or dropping the item.
+
+        Args:
+            item_id: The item whose event has disappeared.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            await conn.execute(
+                f"""
+                UPDATE {settings.db_schema}.calendar_links
+                   SET google_event_id = NULL,
+                       sync_state = 'pending',
+                       error_detail = NULL
+                 WHERE item_id = %s
+                """,
+                (item_id,),
+            )
+
+    async def drop_calendar_link(self, item_id: str) -> None:
+        """Forget an item's calendar link entirely.
+
+        Called once the event is off the calendar and none is wanted. The row
+        is removed rather than kept as a tombstone: if the item is reactivated
+        with a time later, the trigger writes a fresh row and the item gets a
+        fresh event, which is what "the event is a projection" means.
+
+        Args:
+            item_id: The item.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            await conn.execute(
+                f"""
+                DELETE FROM {settings.db_schema}.calendar_links
+                 WHERE item_id = %s
+                """,
+                (item_id,),
+            )
+
+    async def claim_calendar_deletions(self) -> list[dict[str, Any]]:
+        """Take the next batch of events whose item has been deleted (UC39).
+
+        Returns:
+            Rows with the event to remove and the calendar it is on.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                WITH claimed AS (
+                    SELECT id
+                      FROM {settings.db_schema}.calendar_deletions
+                     WHERE attempts < %(max_attempts)s
+                     ORDER BY requested_at ASC
+                     LIMIT %(limit)s
+                ),
+                bumped AS (
+                    UPDATE {settings.db_schema}.calendar_deletions d
+                       SET attempts = d.attempts + 1
+                      FROM claimed
+                     WHERE d.id = claimed.id
+                    RETURNING d.id
+                )
+                SELECT d.id::text, d.google_event_id, d.calendar_id,
+                       d.user_id::text AS user_id
+                  FROM bumped
+                  JOIN {settings.db_schema}.calendar_deletions d
+                    ON d.id = bumped.id
+                """,
+                {
+                    "max_attempts": settings.google_calendar_max_attempts,
+                    "limit": settings.google_calendar_batch_limit,
+                },
+            )
+            columns = [c.name for c in result.description or []]
+            return [dict(zip(columns, row)) for row in await result.fetchall()]
+
+    async def clear_calendar_deletion(self, deletion_id: str) -> None:
+        """Forget a deletion that has been carried out.
+
+        Args:
+            deletion_id: The outbox row.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            await conn.execute(
+                f"""
+                DELETE FROM {settings.db_schema}.calendar_deletions
+                 WHERE id = %s
+                """,
+                (deletion_id,),
+            )
+
+    async def fail_calendar_deletion(self, deletion_id: str, error: str) -> None:
+        """Record why an event could not be removed.
+
+        Args:
+            deletion_id: The outbox row.
+            error: What went wrong.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            await conn.execute(
+                f"""
+                UPDATE {settings.db_schema}.calendar_deletions
+                   SET last_error = %s
+                 WHERE id = %s
+                """,
+                (error[:500], deletion_id),
+            )
+
 
 _db_instance: Optional[Database] = None
 
