@@ -360,3 +360,261 @@ async def test_a_person_belonging_to_someone_else_is_not_found(db):
     assert await db.get_person(linked[0]["id"], other) is None
     rows, _ = await db.person_items(linked[0]["id"], other)
     assert rows == []
+
+
+# ------------------------------------------------- UC48 merge, UC49 split
+
+
+async def link(db: Database, item: str, name: str) -> str:
+    """Link one item to one person and return the entity id."""
+    linked = await db.link_entities(USER, item, [person(name)])
+    return linked[0]["id"]
+
+
+async def alias_list(db: Database, entity_id: str) -> list[str]:
+    async with db.connection() as conn:
+        result = await conn.execute(
+            f"SELECT aliases FROM {settings.db_schema}.entities WHERE id = %s",
+            (entity_id,),
+        )
+        row = await result.fetchone()
+        return list(row[0]) if row else []
+
+
+async def test_a_merge_moves_every_note_to_the_survivor(db):
+    """The point of the feature: two rows that were one person become one.
+
+    "Priya Nair" and "Priya N." is the realistic shape — the transcript spelled
+    the surname differently once, neither token set contains the other, so no
+    automatic rule can join them and the heuristic is right not to try. This is
+    what manual correction is for.
+    """
+    a_item = await make_item(db, "Priya Nair called")
+    b_item = await make_item(db, "Priya N. sent the file")
+    survivor = await link(db, a_item, "Priya Nair")
+    absorbed = await link(db, b_item, "Priya N.")
+    assert survivor != absorbed, "the heuristic should not have joined these"
+
+    result = await db.merge_people(USER, survivor, absorbed)
+    assert result is not None
+
+    rows, _ = await db.person_items(survivor, USER)
+    assert {r["id"] for r in rows} == {a_item, b_item}
+    assert await entity_count(db) == 1
+
+
+async def test_a_merge_takes_the_absorbed_name_as_an_alias(db):
+    """Otherwise tomorrow's mention recreates the row just folded away."""
+    survivor = await link(db, await make_item(db), "Priya Sharma")
+    absorbed = await link(db, await make_item(db), "Anil Kumar")
+
+    await db.merge_people(USER, survivor, absorbed)
+
+    assert "Anil Kumar" in await alias_list(db, survivor)
+
+    # And it resolves there now.
+    later = await make_item(db, "Anil Kumar rang back")
+    linked = await db.link_entities(USER, later, [person("Anil Kumar")])
+    assert linked[0]["id"] == survivor
+
+
+async def test_a_merge_removes_the_absorbed_row(db):
+    survivor = await link(db, await make_item(db), "Priya Sharma")
+    absorbed = await link(db, await make_item(db), "Anil Kumar")
+
+    await db.merge_people(USER, survivor, absorbed)
+
+    assert await db.get_person(absorbed, USER) is None
+    assert await entity_count(db) == 1
+
+
+async def test_a_note_naming_both_people_survives_a_merge(db):
+    """The unique constraint on links makes this a real case, not a crash."""
+    both = await make_item(db, "Priya Sharma and Anil Kumar met")
+    survivor = await link(db, both, "Priya Sharma")
+    absorbed = await link(db, both, "Anil Kumar")
+
+    result = await db.merge_people(USER, survivor, absorbed)
+
+    assert result is not None
+    rows, _ = await db.person_items(survivor, USER)
+    assert [r["id"] for r in rows] == [both]
+    # Counted once, not twice.
+    assert (await db.get_person(survivor, USER))["mentions"] == 1
+
+
+async def test_a_merge_will_not_cross_type(db):
+    """A place called Preston is not the person called Preston."""
+    item = await make_item(db)
+    linked = await db.link_entities(
+        USER,
+        item,
+        [{"type": "person", "name": "Preston"}, {"type": "place", "name": "Preston"}],
+    )
+    a, b = linked[0]["id"], linked[1]["id"]
+
+    assert await db.merge_people(USER, a, b) is None
+
+
+async def test_a_merge_with_itself_is_refused(db):
+    only = await link(db, await make_item(db), "Priya")
+    assert await db.merge_people(USER, only, only) is None
+
+
+async def test_a_merge_is_scoped_to_the_owner(db):
+    survivor = await link(db, await make_item(db), "Priya")
+    absorbed = await link(db, await make_item(db), "Anil")
+
+    other = "00000000-0000-4000-8000-0000000000fd"
+    assert await db.merge_people(other, survivor, absorbed) is None
+    assert await entity_count(db) == 2
+
+
+# ---------------------------------------------------------------- UC49
+
+
+async def test_a_split_moves_the_named_notes_to_a_new_person(db):
+    stays = await make_item(db, "Priya Sharma sent the contract")
+    goes = await make_item(db, "Priya said she would call")
+    source = await link(db, stays, "Priya Sharma")
+    await db.link_entities(USER, goes, [person("Priya")])
+
+    result = await db.split_person(USER, source, [goes], into_name="Priya Nair")
+
+    assert result["moved"] == 1
+    assert result["target_created"] is True
+
+    target_rows, _ = await db.person_items(result["target_id"], USER)
+    assert [r["id"] for r in target_rows] == [goes]
+
+    source_rows, _ = await db.person_items(source, USER)
+    assert [r["id"] for r in source_rows] == [stays]
+
+
+async def test_a_split_can_target_an_existing_person(db):
+    goes = await make_item(db)
+    stays = await make_item(db)
+    source = await link(db, stays, "Priya Sharma")
+    await db.link_entities(USER, goes, [person("Priya")])
+    target = await link(db, await make_item(db), "Anil Kumar")
+
+    result = await db.split_person(USER, source, [goes], into_id=target)
+
+    assert result["target_id"] == target
+    assert result["target_created"] is False
+    rows, _ = await db.person_items(target, USER)
+    assert goes in {r["id"] for r in rows}
+
+
+async def test_an_alias_naming_the_target_follows_the_notes(db):
+    """The bit that stops a correction undoing itself (D45).
+
+    "Priya" became an alias of Priya Sharma because a bare mention landed
+    there. Once those notes are moved to a Priya of their own, leaving the
+    alias behind means the next bare "Priya" resolves straight back.
+    """
+    stays = await make_item(db, "Priya Sharma sent the contract")
+    goes = await make_item(db, "Priya said she would call")
+    source = await link(db, stays, "Priya Sharma")
+    await db.link_entities(USER, goes, [person("Priya")])
+    assert await alias_list(db, source) == ["Priya"]
+
+    result = await db.split_person(USER, source, [goes], into_name="Priya")
+
+    assert result["aliases_moved"] == ["Priya"]
+    assert await alias_list(db, source) == []
+
+    # And the correction holds: a later bare "Priya" goes to the new row.
+    later = await make_item(db, "Priya confirmed")
+    linked = await db.link_entities(USER, later, [person("Priya")])
+    assert linked[0]["id"] == result["target_id"]
+
+
+async def test_an_unrelated_alias_stays_put(db):
+    stays = await make_item(db)
+    goes = await make_item(db)
+    source = await link(db, stays, "Priya Sharma")
+    await db.link_entities(USER, goes, [person("Priya")])
+
+    await db.split_person(USER, source, [goes], into_name="Anil Kumar")
+
+    # "Priya" says nothing about Anil, so it is still Sharma's.
+    assert await alias_list(db, source) == ["Priya"]
+
+
+async def test_splitting_everything_removes_the_empty_source(db):
+    """A name with nothing behind it is clutter; the notes are all still there."""
+    only = await make_item(db)
+    source = await link(db, only, "Priya")
+
+    result = await db.split_person(USER, source, [only], into_name="Priya Nair")
+
+    assert result["source_removed"] is True
+    assert await db.get_person(source, USER) is None
+    rows, _ = await db.person_items(result["target_id"], USER)
+    assert [r["id"] for r in rows] == [only]
+
+
+async def test_a_split_leaves_notes_it_was_not_given(db):
+    a = await make_item(db, "one", age_days=1)
+    b = await make_item(db, "two", age_days=2)
+    c = await make_item(db, "three", age_days=3)
+    source = await link(db, a, "Priya")
+    for item in (b, c):
+        await db.link_entities(USER, item, [person("Priya")])
+
+    await db.split_person(USER, source, [b], into_name="Anil")
+
+    rows, _ = await db.person_items(source, USER)
+    assert {r["id"] for r in rows} == {a, c}
+
+
+async def test_a_split_onto_a_person_who_already_has_the_note(db):
+    """Moving a note somebody already holds must not violate the constraint."""
+    both = await make_item(db, "Priya and Anil met")
+    source = await link(db, both, "Priya")
+    target = await link(db, both, "Anil")
+
+    result = await db.split_person(USER, source, [both], into_id=target)
+
+    assert result is not None
+    # It is off the source either way — that is what was asked for.
+    assert await db.get_person(source, USER) is None
+    rows, _ = await db.person_items(target, USER)
+    assert [r["id"] for r in rows] == [both]
+
+
+async def test_a_split_to_an_existing_name_reuses_that_row(db):
+    """Typing a name that already exists must not collide on the constraint."""
+    goes = await make_item(db)
+    stays = await make_item(db)
+    source = await link(db, stays, "Priya Sharma")
+    await db.link_entities(USER, goes, [person("Priya")])
+    existing = await link(db, await make_item(db), "Anil Kumar")
+
+    result = await db.split_person(USER, source, [goes], into_name="Anil Kumar")
+
+    assert result["target_id"] == existing
+
+
+async def test_a_split_onto_itself_is_refused(db):
+    item = await make_item(db)
+    source = await link(db, item, "Priya")
+
+    assert await db.split_person(USER, source, [item], into_id=source) is None
+    assert await db.split_person(USER, source, [item], into_name="Priya") is None
+
+
+async def test_a_split_needs_something_to_move(db):
+    source = await link(db, await make_item(db), "Priya")
+    assert await db.split_person(USER, source, [], into_name="Anil") is None
+
+
+async def test_a_split_is_scoped_to_the_owner(db):
+    item = await make_item(db)
+    source = await link(db, item, "Priya")
+
+    other = "00000000-0000-4000-8000-0000000000fd"
+    assert await db.split_person(other, source, [item], into_name="Anil") is None
+    rows, _ = await db.person_items(source, USER)
+    assert [r["id"] for r in rows] == [item]

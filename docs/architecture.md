@@ -197,6 +197,24 @@ module is extraction plus UI on top of them, not a migration:
   searching aliases as well as names. Unpaginated on purpose: this table is
   bounded by how many people are in a life, not by capture volume.
 
+**Correction (UC48, UC49)** — both on the person page, both one transaction:
+
+```
+POST /people/{id}/merge  {absorb}                  → links move, name → alias, row deleted
+POST /people/{id}/split  {item_ids, into_id|into_name} → links move, claimed aliases follow
+```
+
+The person in the path survives a merge; direction is fixed rather than a
+parameter so it survives being half-remembered. A split's target is an existing
+person or a name typed into the picker's search box — the same box, so there is
+never a moment of choosing which of two fields to type into. Both operations
+handle the `links` unique constraint rather than tripping over it, which is what
+makes "a note that named both of them" an ordinary case.
+
+**This is what licenses the resolution rules to guess** (D45). With correction
+two taps away, `resolve_entity` only has to be recoverable, not right — so it
+is left as it is rather than tuned. The machine files; the owner adjudicates.
+
 **Recall is manual and stays that way for now.** No calendar triggering, no
 proactive surfacing. That needs UC43 and a delivery tier, and it should not
 be built before the manual version has been used.

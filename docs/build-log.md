@@ -183,8 +183,8 @@ off-site copy is still worth adding.
 | Audio stored + signed playback (UC7) | ✅ verified live, byte-identical |
 | Cloud transcription (UC8) | ✅ verified live — Groq turbo, 1.6s round trip |
 | Multi-item splitting (UC4) | ⚠️ built, never run against real Haiku |
-| Mobile test suite (jest-expo) | ✅ 127 tests, incl. real-tree renders behind a 48dp inset |
-| Backend test suite | ✅ 295 tests, plus 67 opt-in `-m db` on their own schema |
+| Mobile test suite (jest-expo) | ✅ 139 tests, incl. real-tree renders behind a 48dp inset |
+| Backend test suite | ✅ 305 tests, plus 85 opt-in `-m db` on their own schema |
 | Native dep tree vs SDK 57 matrix | ✅ reconciled, `expo-doctor` 21/21 |
 | Google OAuth redirect handling | ✅ callback swallowed, not routed |
 | Google OAuth config | ❌ not started |
@@ -194,7 +194,7 @@ off-site copy is still worth adding.
 | Route render failures surfaced, not swallowed | ✅ `ErrorBoundary` on root and tabs layouts |
 | Reactivate reachable from a list (UC20) | ✅ row button + item detail |
 | People: extract, link, browse, search (UC45/46/47) | ✅ verified live through the API, no migration |
-| Correcting a person by hand (merge/split/rename) | ❌ not built — O6 |
+| Correcting a person by hand (UC48/UC49) | ✅ merge and split, verified live |
 | Session 5 | ❌ not started |
 
 ## 7. Pending — immediate
@@ -1522,3 +1522,61 @@ happens in use. Recall also stays manual: nothing here surfaces itself, no
 calendar triggering, no proactive "you are seeing Ravi in an hour". That needs
 UC43 and a delivery tier and should not be built before the version you have to
 go and open has been used.
+
+### 24 August 2026 — merge and split, and what that does to the heuristic
+
+O6 is closed, and closing it changed what the resolution rules are *for*.
+
+Session 4 spent its effort on getting `resolve_entity` to refuse rather than
+guess: never merge when two candidates match, because a wrong merge is silent
+and a wrong split is visible. That reasoning was sound given what was available
+at the time — nothing could undo a bad call, so the only defence was not making
+one.
+
+Manual correction removes that constraint entirely. With UC48 and UC49 two taps
+from the person page, **the automatic rules no longer have to be right, only
+recoverable** — a much weaker property and a much more achievable one. The
+owner can judge identity for their own life instantly and correctly; a
+heuristic tuned against cases nobody has seen yet cannot. So the division of
+labour is now explicit in D45: *the machine files, the person adjudicates.*
+D43 is left exactly as it is, alias-beats-ambiguity included, not from inertia
+but because tuning it would be optimising the wrong half of the system.
+
+**Merge.** The page you are on survives; the person you pick is folded in and
+removed. Direction is fixed rather than a parameter — a merge you have to
+reason about mid-task is one you will get backwards, and "the page you are on
+stays" survives being half-remembered. Their notes move, and their *name*
+becomes an alias, which is the part that matters: without it the next capture
+using that name would resolve to nobody and quietly recreate the row that was
+just folded away.
+
+**Split.** Select notes, move them to somebody existing or to a name typed on
+the spot. Nothing is deleted, so it asks nothing — only the merge gets a dialog,
+because only the merge removes a row. If every note leaves, the source goes with
+them; a name with nothing behind it is clutter, and the notes are all still
+there on the other page.
+
+**The alias question was the interesting one.** "Priya" becomes an alias of
+Priya Sharma because a bare mention landed there. Move those notes to a Priya of
+their own and leave the alias behind, and the *next* bare "Priya" resolves
+straight back onto the row you just corrected — the correction undoes itself.
+So on a split, an alias of the source that names the target stops being the
+source's (D45). What it deliberately does not do is read the notes to work out
+which alias each one was responsible for. That is a guess about identity, and
+identity is now the owner's call — inferring it would be reintroducing the
+problem this feature exists to solve, one layer down.
+
+Verified live end to end, including the part that matters: two rows the
+heuristic cannot join ("Priya Nair" / "Priya N.", a transcription variance no
+subset rule can see) merged into one; then a bare "Priya" that had landed on
+Nair by the subset rule split off to its own row; then **a fresh capture saying
+"Priya" went to the new row, not back to Nair.** The correction holds, which is
+the whole claim. Test captures deleted afterwards — twelve items, no entities,
+no links.
+
+**One test caught me being sloppy rather than catching a bug.** The first merge
+test set up "Priya Nair" and "Nair" as two rows to merge — except the subset
+rule had already made them one, so the merge refused itself and the assertion I
+had written to guard that (`assert survivor != absorbed or True`) was a no-op I
+had typed without reading. The real shape is "Priya Nair" and "Priya N.": two
+names no rule can join, which is exactly the case manual correction exists for.

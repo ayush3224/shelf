@@ -97,6 +97,8 @@ than a backfill over every note ever captured (D7).
 | UC45 | Voice-record a note about a person; the parse extracts who it is about and links the note to them | P1 |
 | UC46 | Person page — everything ever said about them, **newest first** (was "oldest to newest"; changed by the owner 24 August 2026 — the page is opened to see where things stand, and oldest-first buries that under the history) | P1 |
 | UC47 | Browse and search people | P1 |
+| UC48 | Merge two people — fold one into the other, their name becoming an alias | P1 |
+| UC49 | Split a person — move some of their notes to another person, existing or new | P1 |
 
 **Recall is manual, deliberately.** You go and look someone up. There is no
 calendar triggering and no proactive surfacing — no "you are meeting Ravi in
@@ -108,6 +110,12 @@ used enough to know what is worth surfacing.
 UC44 (the Obsidian-style linked graph) stays P2 and unscheduled. UC45-47 are
 the practical first cut of the same data: the same tables, without the graph
 UI.
+
+**UC48 and UC49 are why the automatic matching is allowed to be imperfect.**
+Added 24 August 2026, after UC45-47 shipped. With correction two taps from the
+person page, a wrong resolution costs a gesture rather than being permanent, so
+`resolve_entity` is deliberately left willing to guess rather than tuned to
+refuse (D45). The owner judges identity; the machine only files.
 
 ## Integrations
 
@@ -136,6 +144,7 @@ becomes the only place decay is visible, which makes it load-bearing rather
 than a nicety. `CLAUDE.md` has been updated to match; reversing this means
 reversing that line too.
 
-**Totals:** 41 active (UC27 folded into UC43; UC6, UC11, UC22, UC29, UC35
-dropped), of which 19 were P0 and 15 remain — UC15, UC17, UC18 and UC23 are
-the outstanding ones. UC2 and UC24 are deferred rather than dropped.
+**Totals:** 43 active (UC48 and UC49 added 24 August 2026; UC27 folded into
+UC43; UC6, UC11, UC22, UC29, UC35 dropped), of which 19 were P0 and 15 remain —
+UC15, UC17, UC18 and UC23 are the outstanding ones. UC2 and UC24 are deferred
+rather than dropped.

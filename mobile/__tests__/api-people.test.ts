@@ -7,7 +7,7 @@
  * And the person page's cursor has to survive the round trip: base64url
  * contains `-` and `_`, and a client that mangles it stops paging silently.
  */
-import { people, person } from '../lib/api';
+import { mergePerson, people, person, splitPerson } from '../lib/api';
 import { supabase } from '../lib/supabase';
 
 jest.mock('expo-secure-store');
@@ -104,4 +104,85 @@ test('a cursor is handed back exactly as it was issued', async () => {
 
   const qs = new URLSearchParams(String(sent[0].url).split('?')[1] ?? '');
   expect(qs.get('cursor')).toBe(cursor);
+});
+
+// ------------------------------------------------ correcting a person
+
+test('a merge names the person being folded in', async () => {
+  const sent = stubApi({
+    person: PERSON,
+    absorbed_id: 'other',
+    absorbed_name: 'Priya N.',
+    moved: 2,
+  });
+  await mergePerson(PERSON.id, 'other');
+
+  expect(String(sent[0].url)).toMatch(new RegExp(`/people/${PERSON.id}/merge$`));
+  expect(JSON.parse(sent[0].init.body as string)).toEqual({ absorb: 'other' });
+  expect(sent[0].init.method).toBe('POST');
+});
+
+test('a split to an existing person sends into_id', async () => {
+  const sent = stubApi({
+    target: PERSON,
+    source: PERSON,
+    source_removed: false,
+    target_created: false,
+    moved: 1,
+    aliases_moved: [],
+  });
+  await splitPerson(PERSON.id, ['item-1'], { id: 'target-1' });
+
+  expect(JSON.parse(sent[0].init.body as string)).toEqual({
+    item_ids: ['item-1'],
+    into_id: 'target-1',
+  });
+});
+
+test('a split to a new person sends into_name and never both', async () => {
+  // The server refuses both-or-neither, so a client that sent both would turn
+  // a correction into a 400 at the moment the user is trying to fix something.
+  const sent = stubApi({
+    target: PERSON,
+    source: PERSON,
+    source_removed: false,
+    target_created: true,
+    moved: 2,
+    aliases_moved: ['Priya'],
+  });
+  await splitPerson(PERSON.id, ['a', 'b'], { name: 'Priya Nair' });
+
+  const body = JSON.parse(sent[0].init.body as string);
+  expect(body).toEqual({ item_ids: ['a', 'b'], into_name: 'Priya Nair' });
+  expect(body).not.toHaveProperty('into_id');
+});
+
+test('a split reports the aliases that followed the notes', async () => {
+  stubApi({
+    target: { ...PERSON, name: 'Priya Nair' },
+    source: PERSON,
+    source_removed: false,
+    target_created: true,
+    moved: 1,
+    aliases_moved: ['Priya'],
+  });
+  const result = await splitPerson(PERSON.id, ['a'], { name: 'Priya Nair' });
+
+  expect(result.aliases_moved).toEqual(['Priya']);
+});
+
+test('a split that empties the source says so', async () => {
+  // The screen has to navigate away; the page it is on no longer exists.
+  stubApi({
+    target: PERSON,
+    source: null,
+    source_removed: true,
+    target_created: true,
+    moved: 3,
+    aliases_moved: [],
+  });
+  const result = await splitPerson(PERSON.id, ['a', 'b', 'c'], { name: 'Anil' });
+
+  expect(result.source_removed).toBe(true);
+  expect(result.source).toBeNull();
 });

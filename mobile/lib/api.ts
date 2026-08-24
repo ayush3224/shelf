@@ -656,3 +656,65 @@ export function person(entityId: string, cursor?: string): Promise<PersonPage> {
   const qs = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
   return request<PersonPage>(`/people/${entityId}${qs}`);
 }
+
+// ------------------------------------------------- correcting a person
+
+export type MergeResponse = {
+  person: Person;
+  absorbed_id: string;
+  absorbed_name: string;
+  /** Notes that changed hands. Lower than the absorbed count when a note named both. */
+  moved: number;
+};
+
+/**
+ * Fold one person into another (UC48).
+ *
+ * The person whose page you are on survives; `absorbId` is folded in and
+ * removed. The direction is fixed rather than a parameter — "the page you are
+ * on is the one that stays" is a rule you can hold in your head, and a merge
+ * you have to reason about is one you will get backwards.
+ *
+ * Destructive: a row disappears. The notes do not.
+ */
+export function mergePerson(
+  entityId: string,
+  absorbId: string,
+): Promise<MergeResponse> {
+  return request<MergeResponse>(`/people/${entityId}/merge`, {
+    method: 'POST',
+    body: JSON.stringify({ absorb: absorbId }),
+  });
+}
+
+export type SplitResponse = {
+  target: Person;
+  /** Null when every note moved and the source row went with them. */
+  source: Person | null;
+  source_removed: boolean;
+  target_created: boolean;
+  moved: number;
+  /** Aliases that stopped being the source's because they name the target (D45). */
+  aliases_moved: string[];
+};
+
+/**
+ * Move some of a person's notes to somebody else (UC49).
+ *
+ * Exactly one of `intoId` and `intoName`. Nothing is deleted and no note is
+ * lost — the mentions simply belong to a different name — so this needs no
+ * confirmation, unlike a merge.
+ */
+export function splitPerson(
+  entityId: string,
+  itemIds: string[],
+  into: { id: string } | { name: string },
+): Promise<SplitResponse> {
+  return request<SplitResponse>(`/people/${entityId}/split`, {
+    method: 'POST',
+    body: JSON.stringify({
+      item_ids: itemIds,
+      ...('id' in into ? { into_id: into.id } : { into_name: into.name }),
+    }),
+  });
+}

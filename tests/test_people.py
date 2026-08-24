@@ -184,11 +184,13 @@ class StubDb(Database):
         person: Optional[dict[str, Any]] = None,
         items: Optional[list[dict[str, Any]]] = None,
         has_more: bool = False,
+        source_removed: bool = False,
     ) -> None:
         self.people = people if people is not None else []
         self.person = person
         self.items = items if items is not None else []
         self.has_more = has_more
+        self.source_removed = source_removed
         self.calls: list[dict[str, Any]] = []
 
     async def list_people(
@@ -211,6 +213,51 @@ class StubDb(Database):
     ) -> tuple[list[dict[str, Any]], bool]:
         self.calls.append({"entity_id": entity_id, "after": after, "limit": limit})
         return self.items, self.has_more
+
+    async def merge_people(
+        self, user_id: str, survivor_id: str, absorbed_id: str
+    ) -> Optional[dict[str, Any]]:
+        self.calls.append(
+            {"merge": True, "survivor": survivor_id, "absorbed": absorbed_id}
+        )
+        if self.person is None:
+            return None
+        return {
+            "survivor_id": survivor_id,
+            "absorbed_id": absorbed_id,
+            "absorbed_name": "Anil Kumar",
+            "aliases": ["Priya", "Anil Kumar"],
+            "moved": 2,
+        }
+
+    async def split_person(
+        self,
+        user_id: str,
+        source_id: str,
+        item_ids: Any,
+        into_id: Optional[str] = None,
+        into_name: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        self.calls.append(
+            {
+                "split": True,
+                "source": source_id,
+                "items": list(item_ids),
+                "into_id": into_id,
+                "into_name": into_name,
+            }
+        )
+        if self.person is None:
+            return None
+        return {
+            "source_id": source_id,
+            "source_removed": self.source_removed,
+            "target_id": PERSON["id"],
+            "target_name": "Priya Nair",
+            "target_created": into_id is None,
+            "moved": len(list(item_ids)),
+            "aliases_moved": ["Priya"],
+        }
 
 
 PERSON = {
@@ -359,3 +406,124 @@ def test_without_an_alias_the_same_pair_is_declined():
 
     assert result.ambiguous is True
     assert result.entity_id is None
+
+
+# ---------------------------------------------------- UC48 merge, UC49 split
+
+OTHER = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+ITEM = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+
+
+def test_merge_requires_a_token(client):
+    response = client(StubDb()).post(
+        f"/people/{PERSON['id']}/merge", json={"absorb": OTHER}
+    )
+    assert response.status_code == 401
+
+
+def test_a_merge_folds_the_named_person_in(client):
+    db = StubDb(person=PERSON)
+    response = client(db).post(
+        f"/people/{PERSON['id']}/merge", json={"absorb": OTHER}, headers=auth()
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["absorbed_id"] == OTHER
+    assert body["moved"] == 2
+    assert body["person"]["name"] == "Priya Sharma"
+
+
+def test_the_page_you_are_on_is_the_survivor(client):
+    """Direction is fixed, not a parameter — it has to be holdable in the head."""
+    db = StubDb(person=PERSON)
+    client(db).post(
+        f"/people/{PERSON['id']}/merge", json={"absorb": OTHER}, headers=auth()
+    )
+
+    call = next(c for c in db.calls if c.get("merge"))
+    assert call["survivor"] == PERSON["id"]
+    assert call["absorbed"] == OTHER
+
+
+def test_merging_someone_into_themselves_is_refused(client):
+    response = client(StubDb(person=PERSON)).post(
+        f"/people/{PERSON['id']}/merge",
+        json={"absorb": PERSON["id"]},
+        headers=auth(),
+    )
+    assert response.status_code == 400
+
+
+def test_merging_an_unknown_person_is_404(client):
+    response = client(StubDb(person=None)).post(
+        f"/people/{PERSON['id']}/merge", json={"absorb": OTHER}, headers=auth()
+    )
+    assert response.status_code == 404
+
+
+def test_a_split_to_a_new_name(client):
+    db = StubDb(person=PERSON)
+    response = client(db).post(
+        f"/people/{PERSON['id']}/split",
+        json={"item_ids": [ITEM], "into_name": "Priya Nair"},
+        headers=auth(),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["target_created"] is True
+    assert body["moved"] == 1
+    assert body["aliases_moved"] == ["Priya"]
+
+
+def test_a_split_to_an_existing_person(client):
+    db = StubDb(person=PERSON)
+    client(db).post(
+        f"/people/{PERSON['id']}/split",
+        json={"item_ids": [ITEM], "into_id": OTHER},
+        headers=auth(),
+    )
+
+    call = next(c for c in db.calls if c.get("split"))
+    assert call["into_id"] == OTHER
+    assert call["into_name"] is None
+
+
+def test_a_split_needs_exactly_one_destination(client):
+    """Both or neither is a client bug, and answering it with a guess would
+    move somebody's notes somewhere they did not ask for."""
+    both = client(StubDb(person=PERSON)).post(
+        f"/people/{PERSON['id']}/split",
+        json={"item_ids": [ITEM], "into_id": OTHER, "into_name": "Priya Nair"},
+        headers=auth(),
+    )
+    assert both.status_code == 400
+
+    neither = client(StubDb(person=PERSON)).post(
+        f"/people/{PERSON['id']}/split", json={"item_ids": [ITEM]}, headers=auth()
+    )
+    assert neither.status_code == 400
+
+
+def test_a_split_needs_at_least_one_note(client):
+    response = client(StubDb(person=PERSON)).post(
+        f"/people/{PERSON['id']}/split",
+        json={"item_ids": [], "into_name": "Priya Nair"},
+        headers=auth(),
+    )
+    assert response.status_code == 422
+
+
+def test_a_split_that_empties_the_source_reports_it(client):
+    """The client has to know the page it is on no longer exists."""
+    db = StubDb(person=PERSON, source_removed=True)
+    response = client(db).post(
+        f"/people/{PERSON['id']}/split",
+        json={"item_ids": [ITEM], "into_name": "Priya Nair"},
+        headers=auth(),
+    )
+
+    body = response.json()
+    assert body["source_removed"] is True
+    assert body["source"] is None

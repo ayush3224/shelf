@@ -13,10 +13,21 @@
  *
  * Playback is on the row (UC7), because half of what gets said about a person
  * is said rather than typed, and the transcript is a lossy copy of it.
+ *
+ * **This is also where a wrong resolution gets corrected** (UC48, UC49). Merge
+ * folds another person into this one; select-and-move sends notes to somebody
+ * else. Both are two taps from here, and between them any automatic mistake is
+ * recoverable — which is precisely what lets the resolution rules stay willing
+ * to guess (D45).
+ *
+ * Only the merge asks first. It is the one that removes a row; a move relocates
+ * mentions and can be undone by moving them back, so a dialog in front of it
+ * would be ceremony rather than a safeguard.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Pressable,
   RefreshControl,
@@ -27,9 +38,15 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Stack, router, useLocalSearchParams } from 'expo-router';
 
-import { ApiError, person as fetchPerson } from '../../lib/api';
+import {
+  ApiError,
+  mergePerson,
+  person as fetchPerson,
+  splitPerson,
+} from '../../lib/api';
 import type { ItemState, Person, PersonItem } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
+import { PersonPicker } from '../../lib/PersonPicker';
 import { usePlayback } from '../../lib/playback';
 import { capturedOnLabel } from '../../lib/time';
 import { color, radius, space } from '../../lib/theme';
@@ -48,15 +65,43 @@ type RowProps = {
   onPlay: (id: string) => void;
   playing: boolean;
   loadingAudio: boolean;
+  /** Selection mode is on; the row picks rather than navigates. */
+  selecting: boolean;
+  selected: boolean;
+  onToggle: (id: string) => void;
 };
 
-function Row({ item, onOpen, onPlay, playing, loadingAudio }: RowProps) {
+function Row({
+  item,
+  onOpen,
+  onPlay,
+  playing,
+  loadingAudio,
+  selecting,
+  selected,
+  onToggle,
+}: RowProps) {
   return (
-    <View style={styles.row}>
+    <View style={[styles.row, selecting && selected && styles.rowSelected]}>
+      {selecting ? (
+        <Pressable
+          accessibilityRole="checkbox"
+          accessibilityState={{ checked: selected }}
+          accessibilityLabel={`Select: ${item.text}`}
+          hitSlop={10}
+          onPress={() => onToggle(item.id)}
+          style={[styles.check, selected && styles.checkOn]}
+        >
+          {selected ? <Text style={styles.checkGlyph}>✓</Text> : null}
+        </Pressable>
+      ) : null}
+
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel={`Open: ${item.text}`}
-        onPress={() => onOpen(item.id)}
+        accessibilityLabel={
+          selecting ? `Select: ${item.text}` : `Open: ${item.text}`
+        }
+        onPress={() => (selecting ? onToggle(item.id) : onOpen(item.id))}
         style={({ pressed }) => [styles.rowBody, pressed && styles.rowPressed]}
       >
         <Text style={styles.rowText}>{item.text}</Text>
@@ -73,7 +118,7 @@ function Row({ item, onOpen, onPlay, playing, loadingAudio }: RowProps) {
         </View>
       </Pressable>
 
-      {item.has_audio ? (
+      {item.has_audio && !selecting ? (
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={playing ? 'Stop the recording' : 'Play the recording'}
@@ -104,6 +149,13 @@ export default function PersonScreen() {
   const [paging, setPaging] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  /** Selection mode, and what is selected. Empty set means mode is off. */
+  const [selection, setSelection] = useState<Set<string> | null>(null);
+  /** Which flow the picker is serving, or null when it is closed. */
+  const [picking, setPicking] = useState<'merge' | 'move' | null>(null);
 
   const generation = useRef(0);
 
@@ -163,6 +215,106 @@ export default function PersonScreen() {
     void load('initial');
   }, [load]);
 
+
+  const selecting = selection !== null;
+
+  const toggle = useCallback((itemId: string) => {
+    setSelection((current) => {
+      if (current === null) return current;
+      const next = new Set(current);
+      if (next.has(itemId)) next.delete(itemId);
+      else next.add(itemId);
+      return next;
+    });
+  }, []);
+
+  const endSelection = useCallback(() => {
+    setSelection(null);
+    setPicking(null);
+  }, []);
+
+  /** Fold somebody into this person (UC48). Destructive, so it asks first. */
+  const merge = useCallback(
+    async (absorbId: string) => {
+      setPicking(null);
+      setBusy(true);
+      setError(null);
+      setNotice(null);
+      try {
+        const result = await mergePerson(id, absorbId);
+        setWho(result.person);
+        setNotice(
+          `${result.absorbed_name} folded in — ${result.moved} ${
+            result.moved === 1 ? 'note' : 'notes'
+          } moved here.`,
+        );
+        // Reload rather than patch: the merged list is a different page of a
+        // different length, and guessing it here is how the screen starts lying.
+        await load('refresh');
+      } catch (e) {
+        await failed(e, 'Could not merge those two.');
+      } finally {
+        setBusy(false);
+      }
+    },
+    [id, load, failed],
+  );
+
+  const confirmMerge = useCallback(
+    (choice: { id: string } | { name: string }) => {
+      if (!('id' in choice)) return;
+      const absorbed = choice.id;
+      // The only dialog in either flow. A merge removes a row; a move does not.
+      Alert.alert(
+        'Fold them together?',
+        `Their notes move to ${who?.name ?? 'this person'}, their name becomes another name for ${who?.name ?? 'them'}, and their entry is removed. The notes are not deleted.`,
+        [
+          { text: 'Cancel', style: 'cancel', onPress: () => setPicking(null) },
+          {
+            text: 'Merge',
+            style: 'destructive',
+            onPress: () => void merge(absorbed),
+          },
+        ],
+      );
+    },
+    [who, merge],
+  );
+
+  /** Move the selected notes to somebody else (UC49). Nothing is deleted. */
+  const move = useCallback(
+    async (choice: { id: string } | { name: string }) => {
+      const chosen = selection ? [...selection] : [];
+      setPicking(null);
+      if (!chosen.length) return;
+      setBusy(true);
+      setError(null);
+      setNotice(null);
+      try {
+        const result = await splitPerson(id, chosen, choice);
+        setSelection(null);
+        if (result.source_removed) {
+          // Every note left. The page we are on no longer exists, so staying
+          // on it would render a 404 the moment anything refetched.
+          router.replace(`/person/${result.target.id}`);
+          return;
+        }
+        const alias = result.aliases_moved.length
+          ? ` “${result.aliases_moved.join('”, “')}” went with them.`
+          : '';
+        setNotice(
+          `${result.moved} ${result.moved === 1 ? 'note' : 'notes'} moved to ${result.target.name}.${alias}`,
+        );
+        await load('refresh');
+      } catch (e) {
+        await failed(e, 'Could not move those notes.');
+      } finally {
+        setBusy(false);
+      }
+    },
+    [id, selection, load, failed],
+  );
+
   if (loading) {
     return (
       <SafeAreaView style={styles.centered} edges={['top', 'left', 'right']}>
@@ -179,11 +331,11 @@ export default function PersonScreen() {
       <View style={styles.header}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Back to people"
+          accessibilityLabel={selecting ? 'Stop selecting' : 'Back to people'}
           hitSlop={12}
-          onPress={() => router.back()}
+          onPress={() => (selecting ? endSelection() : router.back())}
         >
-          <Text style={styles.back}>‹ People</Text>
+          <Text style={styles.back}>{selecting ? 'Cancel' : '‹ People'}</Text>
         </Pressable>
         <Text style={styles.title}>{who?.name ?? 'Person'}</Text>
         <View style={styles.subhead}>
@@ -194,11 +346,68 @@ export default function PersonScreen() {
             {who?.mentions === 1 ? '1 mention' : `${who?.mentions ?? 0} mentions`}
           </Text>
         </View>
+
+        {/* Two taps to either correction, and never more than two controls in
+            view: the actions swap for the selection's own when it is running. */}
+        <View style={styles.actions}>
+          {selecting ? (
+            <>
+              <Text style={styles.selectedCount}>
+                {selection?.size ?? 0} selected
+              </Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Move the selected notes to someone else"
+                disabled={busy || !selection?.size}
+                onPress={() => setPicking('move')}
+                style={({ pressed }) => [
+                  styles.action,
+                  styles.actionPrimary,
+                  pressed && styles.pressed,
+                  (busy || !selection?.size) && styles.dimmed,
+                ]}
+              >
+                <Text style={styles.actionPrimaryText}>Move to…</Text>
+              </Pressable>
+            </>
+          ) : (
+            <>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Select notes to move to someone else"
+                disabled={busy || items.length === 0}
+                onPress={() => setSelection(new Set())}
+                style={({ pressed }) => [
+                  styles.action,
+                  pressed && styles.pressed,
+                  (busy || items.length === 0) && styles.dimmed,
+                ]}
+              >
+                <Text style={styles.actionText}>Move notes</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Fold another person into this one"
+                disabled={busy}
+                onPress={() => setPicking('merge')}
+                style={({ pressed }) => [
+                  styles.action,
+                  pressed && styles.pressed,
+                  busy && styles.dimmed,
+                ]}
+              >
+                <Text style={styles.actionText}>Merge</Text>
+              </Pressable>
+            </>
+          )}
+          {busy ? <ActivityIndicator color={color.muted} size="small" /> : null}
+        </View>
       </View>
 
       {error ?? playback.error ? (
         <Text style={styles.error}>{error ?? playback.error}</Text>
       ) : null}
+      {notice && !error ? <Text style={styles.notice}>{notice}</Text> : null}
 
       <FlatList
         data={items}
@@ -210,6 +419,9 @@ export default function PersonScreen() {
             onPlay={(itemId) => void playback.toggle(itemId)}
             playing={playback.activeId === item.id && !playback.loading}
             loadingAudio={playback.activeId === item.id && playback.loading}
+            selecting={selecting}
+            selected={selection?.has(item.id) ?? false}
+            onToggle={toggle}
           />
         )}
         contentContainerStyle={items.length === 0 ? styles.emptyWrap : styles.list}
@@ -235,6 +447,22 @@ export default function PersonScreen() {
             </Text>
           </View>
         }
+      />
+
+      <PersonPicker
+        visible={picking !== null}
+        title={picking === 'merge' ? 'Fold in whom?' : 'Move to whom?'}
+        subtitle={
+          picking === 'merge'
+            ? `Their notes come here and their entry is removed. ${who?.name ?? 'This person'} stays.`
+            : 'The notes move. Nothing is deleted.'
+        }
+        excludeId={id}
+        // A merge needs somebody who already has notes; there is nothing to
+        // fold in from a person who does not exist yet.
+        allowCreate={picking === 'move'}
+        onPick={picking === 'merge' ? confirmMerge : move}
+        onCancel={() => setPicking(null)}
       />
     </SafeAreaView>
   );
@@ -265,6 +493,36 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     color: color.danger,
   },
+  notice: {
+    marginHorizontal: space.lg,
+    marginBottom: space.sm,
+    fontSize: 14,
+    lineHeight: 20,
+    color: color.muted,
+  },
+  actions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.sm,
+    marginTop: space.sm,
+  },
+  selectedCount: { flex: 1, fontSize: 14, color: color.muted },
+  // `minHeight` and padding, not a height: these hold text (D42).
+  action: {
+    minHeight: 34,
+    justifyContent: 'center',
+    paddingHorizontal: space.md,
+    paddingVertical: space.xs + 2,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: color.border,
+    backgroundColor: color.surface,
+  },
+  actionText: { fontSize: 13, fontWeight: '600', color: color.muted },
+  actionPrimary: { backgroundColor: color.accent, borderColor: color.accent },
+  actionPrimaryText: { fontSize: 13, fontWeight: '600', color: color.accentText },
+  pressed: { opacity: 0.6 },
+  dimmed: { opacity: 0.4 },
   list: { paddingHorizontal: space.lg, paddingBottom: space.xl, gap: space.sm },
   row: {
     flexDirection: 'row',
@@ -277,6 +535,18 @@ const styles = StyleSheet.create({
     padding: space.md,
   },
   rowPressed: { opacity: 0.6 },
+  rowSelected: { borderColor: color.accent },
+  check: {
+    width: 22,
+    height: 22,
+    borderRadius: radius.pill,
+    borderWidth: 2,
+    borderColor: color.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  checkOn: { backgroundColor: color.accent, borderColor: color.accent },
+  checkGlyph: { fontSize: 12, color: color.accentText, fontWeight: '700' },
   rowBody: { flex: 1, gap: space.xs },
   rowText: { fontSize: 16, lineHeight: 22, color: color.text },
   meta: { flexDirection: 'row', alignItems: 'center', gap: space.xs + 2 },

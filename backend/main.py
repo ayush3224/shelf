@@ -272,6 +272,55 @@ class Person(BaseModel):
     last_mentioned: Optional[datetime] = None
 
 
+class MergeRequest(BaseModel):
+    """Body for POST /people/{id}/merge (UC48).
+
+    The person in the path survives; `absorb` is folded into them. Direction is
+    fixed rather than a parameter because the UI starts from a page, and "the
+    page you are on is the one that stays" is a rule you can hold in your head.
+    """
+
+    absorb: UUID = Field(..., description="The person to fold in and remove")
+
+
+class MergeResponse(BaseModel):
+    """What a merge did."""
+
+    person: "Person"
+    absorbed_id: str
+    absorbed_name: str
+    #: Notes that changed hands. Lower than the absorbed person's mention count
+    #: when a note named both of them and was already on the survivor.
+    moved: int
+
+
+class SplitRequest(BaseModel):
+    """Body for POST /people/{id}/split (UC49).
+
+    Exactly one of `into_id` and `into_name`. `into_name` is the picker's
+    "create" path — the name typed into the search box when nobody matched.
+    """
+
+    item_ids: list[UUID] = Field(..., min_length=1, description="Notes to move")
+    into_id: Optional[UUID] = Field(default=None, description="An existing person")
+    into_name: Optional[str] = Field(default=None, description="A new person's name")
+
+
+class SplitResponse(BaseModel):
+    """What a split did."""
+
+    target: "Person"
+    #: Null when every note moved and the source row was removed with nothing
+    #: left behind it.
+    source: Optional["Person"] = None
+    source_removed: bool = False
+    target_created: bool = False
+    moved: int
+    #: Aliases that stopped belonging to the source because they name the
+    #: target. This is the bit that stops a correction undoing itself (D45).
+    aliases_moved: list[str] = Field(default_factory=list)
+
+
 class PeopleResponse(BaseModel):
     """Response for GET /people (UC47)."""
 
@@ -1207,6 +1256,131 @@ async def person_page(
             else None
         ),
         has_more=has_more and bool(rows),
+    )
+
+
+@app.post("/people/{entity_id}/merge", response_model=MergeResponse)
+async def merge_person(
+    entity_id: UUID,
+    request: MergeRequest,
+    db: Database = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+) -> MergeResponse:
+    """Fold one person into another (UC48).
+
+    The destructive half of manual correction, and the reason the automatic
+    rules are allowed to guess at all (D45): a resolution that split one person
+    into two rows is now a two-tap fix rather than a permanent wrong answer.
+
+    The person in the path survives. The absorbed one's notes move across and
+    their name becomes an alias, so the next capture that uses it resolves here
+    instead of recreating the row that was just folded away.
+
+    Args:
+        entity_id: The person who stays — the page the merge started from.
+        request: Who to fold in.
+        db: Database connection.
+        user_id: Authenticated user, from the Supabase token.
+
+    Returns:
+        The survivor as it now stands, and what went into it.
+
+    Raises:
+        HTTPException: 400 merging somebody into themselves, 404 if either
+            person is missing or they are not the same kind of thing.
+    """
+    if str(request.absorb) == str(entity_id):
+        raise HTTPException(status_code=400, detail="That is the same person")
+
+    try:
+        result = await db.merge_people(user_id, str(entity_id), str(request.absorb))
+    except Exception as e:
+        logger.error("Failed to merge %s into %s: %s", request.absorb, entity_id, e)
+        raise HTTPException(status_code=500, detail="Failed to merge")
+
+    if result is None:
+        raise HTTPException(status_code=404, detail="No such person")
+
+    person = await db.get_person(str(entity_id), user_id)
+    if person is None:
+        raise HTTPException(status_code=404, detail="No such person")
+
+    return MergeResponse(
+        person=Person(**person),
+        absorbed_id=result["absorbed_id"],
+        absorbed_name=result["absorbed_name"],
+        moved=result["moved"],
+    )
+
+
+@app.post("/people/{entity_id}/split", response_model=SplitResponse)
+async def split_person(
+    entity_id: UUID,
+    request: SplitRequest,
+    db: Database = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+) -> SplitResponse:
+    """Move some of a person's notes to somebody else (UC49).
+
+    The non-destructive half: nothing is deleted and no note is lost, the
+    mentions simply belong to a different name. The source row is removed only
+    when every note has left it, because a name with nothing behind it is
+    clutter rather than data.
+
+    An alias of the source that names the target moves with the notes (D45).
+    Without that, the next bare mention resolves straight back onto the row
+    just corrected and the correction undoes itself.
+
+    Args:
+        entity_id: The person the notes are leaving.
+        request: Which notes, and who they belong to instead.
+        db: Database connection.
+        user_id: Authenticated user, from the Supabase token.
+
+    Returns:
+        Both people afterwards, and what moved.
+
+    Raises:
+        HTTPException: 400 if the target is unusable, 404 if either person is
+            missing.
+    """
+    if bool(request.into_id) == bool(request.into_name and request.into_name.strip()):
+        raise HTTPException(
+            status_code=400, detail="Name a person to move them to, or pick one"
+        )
+
+    try:
+        result = await db.split_person(
+            user_id=user_id,
+            source_id=str(entity_id),
+            item_ids=[str(i) for i in request.item_ids],
+            into_id=str(request.into_id) if request.into_id else None,
+            into_name=request.into_name,
+        )
+    except Exception as e:
+        logger.error("Failed to split %s: %s", entity_id, e)
+        raise HTTPException(status_code=500, detail="Failed to move those notes")
+
+    if result is None:
+        raise HTTPException(status_code=404, detail="No such person")
+
+    target = await db.get_person(result["target_id"], user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="No such person")
+
+    source = (
+        None
+        if result["source_removed"]
+        else await db.get_person(str(entity_id), user_id)
+    )
+
+    return SplitResponse(
+        target=Person(**target),
+        source=Person(**source) if source else None,
+        source_removed=result["source_removed"],
+        target_created=result["target_created"],
+        moved=result["moved"],
+        aliases_moved=result["aliases_moved"],
     )
 
 

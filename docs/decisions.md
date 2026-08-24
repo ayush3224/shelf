@@ -581,21 +581,60 @@ time in one case and by person in the other.
 *Revisit if:* a fifth retrieval surface is proposed, or daily use shows People
 being opened rarely enough that a tab is not paying for itself.
 
+**D45 — Manual correction is the answer to a wrong resolution, so the
+heuristic is deliberately allowed to guess.**
+UC48 (merge) and UC49 (split) close O6. With both on the person page, the
+automatic rules in D43 no longer have to be *right* — they have to be
+**recoverable**, which is a much weaker and much more achievable property.
+This changes what D43 is for, and D43 itself is unchanged on purpose. Its
+rules — same name, then alias, then a unique token subset, and the
+alias-beats-ambiguity asymmetry — all stay exactly as they are. The argument
+for leaving them alone is that tuning a heuristic against cases you have not
+seen yet is guesswork, whereas judging identity is something the owner can do
+instantly and correctly for their own life. The right division of labour is
+therefore: **the machine files, the person adjudicates.** A resolution that
+guesses and is occasionally wrong is now strictly better than one that refuses
+and is always incomplete, because the cost of a wrong guess has gone from
+permanent to two taps.
+*What this licenses.* Nothing new — but it means future proposals to make
+resolution cleverer should be weighed against whether the correction path is
+adequate, not against whether the guess is defensible. If merge and split cover
+it, the guess is fine.
+*Direction is fixed, not chosen.* The person whose page you are on survives a
+merge. Making it a parameter would mean reasoning about direction mid-task,
+which is how you get it backwards; "the page you are on stays" is a rule that
+survives being half-remembered. To keep the other name, start from the other
+page.
+*Aliases follow the notes.* On a split, an alias of the source that names the
+target stops being the source's. This is the difference between a correction
+that holds and one that undoes itself: "Priya" became an alias of Priya Sharma
+because a bare mention landed there, and if those notes move to a Priya of
+their own while the alias stays, the next bare "Priya" resolves straight back
+onto the row just corrected. The rule matches names only and deliberately does
+not read the notes to infer which alias a note was responsible for — that is a
+guess about identity, and identity is now the owner's call.
+*Only the merge asks.* It removes a row. A split relocates mentions and is
+undone by moving them back, so a dialog in front of it is ceremony rather than
+a safeguard.
+*Emptying a person removes them.* A split that moves every note leaves a name
+with nothing behind it, which is clutter and not data — the notes are all still
+there, on the other page.
+
 ---
 
 ## Open
 
-**O6 — Correcting a person by hand.** Nothing can merge two entities,
-split one, rename it, or move a note off the wrong page. Three paths already
-produce rows a human would want to reconcile: an ambiguous name that was
-declined and got its own row (D43), a name the subset rule cannot see as the
-same person ("Sharma Priya"), and the residual risk of alias precedence — a
-bare "Priya" that meant Nair landing on Sharma's page.
-Not built in session 4 because it is a fourth use case and none of UC45-47 asks
-for it, and because what it should look like depends on which of those three
-actually happens. The `transitions` table is no help here; the evidence is the
-People list itself. *Answer it by:* using People for a month and counting the
-near-duplicates. If there are none, this stays unbuilt.
+**O6 — Correcting a person by hand. CLOSED, 24 August 2026.**
+Answered by building it: UC48 merge and UC49 split, both on the person page
+(D45). All three paths that could leave a row wanting reconciliation — a
+declined ambiguous name, a name the subset rule cannot see as the same person,
+and the residual risk of alias precedence — now have the same two-tap fix.
+*What survives:* the question of whether the automatic rules should be tuned at
+all. The answer is now "probably not" — with correction available they only
+need to be recoverable, and the owner judges identity faster and better than a
+heuristic can. *Reopen if:* correcting turns out to be frequent enough to be a
+chore, which would mean the resolution rules are wrong in a way worth measuring
+rather than a way worth shrugging at.
 
 **O1 — `SHELVE_AFTER_IGNORES`.** Default 3. After a month, query
 `transitions` for items that were shelved by decay and later

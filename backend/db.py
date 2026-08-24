@@ -220,6 +220,81 @@ def resolve_entity(
     )
 
 
+def merged_aliases(
+    survivor_name: str,
+    survivor_aliases: Sequence[str],
+    absorbed_name: str,
+    absorbed_aliases: Sequence[str],
+) -> list[str]:
+    """Every name the survivor of a merge should answer to (UC48).
+
+    The absorbed person's canonical name is the important one: it is what the
+    parse will keep producing tomorrow, and without it as an alias the next
+    mention would resolve to nobody and quietly recreate the row that was just
+    folded away.
+
+    Order is survivor's own aliases, then the absorbed name, then theirs —
+    first-seen wins, so the display keeps whatever spelling was already in use.
+
+    Args:
+        survivor_name: Canonical name of the row that stays.
+        survivor_aliases: Its aliases.
+        absorbed_name: Canonical name of the row being folded in.
+        absorbed_aliases: Its aliases.
+
+    Returns:
+        A deduplicated alias list that never contains the survivor's own name.
+    """
+    out: list[str] = []
+    seen = {_normalized(survivor_name)}
+    for alias in [*survivor_aliases, absorbed_name, *absorbed_aliases]:
+        key = _normalized(alias)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(alias)
+    return out
+
+
+def aliases_after_split(
+    source_aliases: Sequence[str], target_name: str, target_aliases: Sequence[str]
+) -> tuple[list[str], list[str]]:
+    """Which of the source's aliases follow the notes out (UC49, D45).
+
+    The case worth handling is the one that caused the split. A row called
+    "Priya Sharma" picked up "Priya" as an alias because a bare mention landed
+    on it; if those notes turn out to be about a different Priya and get moved,
+    leaving "Priya" on Sharma means the *next* bare "Priya" resolves straight
+    back onto the row you just corrected, and the correction undoes itself.
+
+    So the rule is narrow and stated rather than inferred: **an alias that
+    names the target stops being an alias of the source.** Matching the
+    target's canonical name or any alias it already has.
+
+    What this deliberately does not do is read the notes. Deciding from an
+    item's text which alias it was responsible for is exactly the kind of
+    guess the manual path exists to replace — and it would be a guess about
+    identity, which is now the owner's call (D45).
+
+    Args:
+        source_aliases: Aliases on the row the notes are leaving.
+        target_name: Canonical name of the row they are going to.
+        target_aliases: Aliases it already has.
+
+    Returns:
+        `(kept, moved)` — what stays on the source, and what the target had
+        claim to.
+    """
+    claimed = {_normalized(target_name)}
+    claimed.update(_normalized(alias) for alias in target_aliases)
+
+    kept: list[str] = []
+    moved: list[str] = []
+    for alias in source_aliases:
+        (moved if _normalized(alias) in claimed else kept).append(alias)
+    return kept, moved
+
+
 class Database:
     """Database connection manager."""
 
@@ -1090,6 +1165,277 @@ class Database:
                 )
 
         return linked
+
+    async def merge_people(
+        self, user_id: str, survivor_id: str, absorbed_id: str
+    ) -> Optional[dict[str, Any]]:
+        """Fold one person into another (UC48).
+
+        The survivor is the page the merge was started from. Every note the
+        absorbed row held moves across, its name becomes an alias so tomorrow's
+        mention resolves here too, and the row itself goes.
+
+        Atomic: the pool's connection block commits at the end or rolls back,
+        and a half-done merge is a person whose notes have moved but whose row
+        still exists — which is exactly the state this feature is for undoing.
+
+        Args:
+            user_id: Owner; both rows are scoped to them.
+            survivor_id: The row that stays.
+            absorbed_id: The row that is folded in and deleted.
+
+        Returns:
+            The survivor as it now stands plus what was absorbed, or None if
+            either row is missing, they are the same row, or they are not the
+            same kind of thing.
+        """
+        if survivor_id == absorbed_id:
+            return None
+
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                SELECT id::text, type::text, name, aliases
+                  FROM {settings.db_schema}.entities
+                 WHERE user_id = %s AND id = ANY(%s::uuid[])
+                """,
+                (user_id, [survivor_id, absorbed_id]),
+            )
+            columns = [c.name for c in result.description or []]
+            rows = {
+                r["id"]: r
+                for r in (dict(zip(columns, row)) for row in await result.fetchall())
+            }
+
+            survivor = rows.get(survivor_id)
+            absorbed = rows.get(absorbed_id)
+            if survivor is None or absorbed is None:
+                return None
+            if survivor["type"] != absorbed["type"]:
+                # A place called Preston is not the person called Preston, and
+                # folding one into the other is never what was meant.
+                return None
+
+            # Move the links, skipping any the survivor already holds — the
+            # unique constraint on (item_id, entity_id, relation) is what makes
+            # a note mentioning both people a real case rather than a crash.
+            moved = await conn.execute(
+                f"""
+                UPDATE {settings.db_schema}.links l
+                   SET entity_id = %(survivor)s
+                 WHERE l.entity_id = %(absorbed)s
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM {settings.db_schema}.links x
+                        WHERE x.item_id = l.item_id
+                          AND x.entity_id = %(survivor)s
+                          AND x.relation = l.relation)
+                """,
+                {"survivor": survivor_id, "absorbed": absorbed_id},
+            )
+            moved_count = moved.rowcount or 0
+
+            # Whatever is left is a duplicate of a link the survivor already
+            # had. It goes with the row.
+            await conn.execute(
+                f"DELETE FROM {settings.db_schema}.links WHERE entity_id = %s",
+                (absorbed_id,),
+            )
+
+            aliases = merged_aliases(
+                survivor["name"],
+                list(survivor["aliases"]),
+                absorbed["name"],
+                list(absorbed["aliases"]),
+            )
+            await conn.execute(
+                f"""
+                UPDATE {settings.db_schema}.entities
+                   SET aliases = %s
+                 WHERE id = %s AND user_id = %s
+                """,
+                (Json(aliases), survivor_id, user_id),
+            )
+            await conn.execute(
+                f"DELETE FROM {settings.db_schema}.entities WHERE id = %s AND user_id = %s",
+                (absorbed_id, user_id),
+            )
+
+        return {
+            "survivor_id": survivor_id,
+            "absorbed_id": absorbed_id,
+            "absorbed_name": absorbed["name"],
+            "aliases": aliases,
+            "moved": moved_count,
+        }
+
+    async def split_person(
+        self,
+        user_id: str,
+        source_id: str,
+        item_ids: Sequence[str],
+        into_id: Optional[str] = None,
+        into_name: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Move some of a person's notes to somebody else (UC49).
+
+        The other half of UC48: a merge fixes two rows that should be one, this
+        fixes one row that should be two. Between them a wrong resolution is
+        always recoverable, which is what lets the automatic rules stay willing
+        to guess (D45).
+
+        The target is either an existing person or a name typed on the spot. A
+        typed name that already belongs to somebody resolves to them rather
+        than colliding with the unique constraint — the picker offers to create
+        only what does not exist, but two taps can race and the database is the
+        thing that decides.
+
+        Args:
+            user_id: Owner.
+            source_id: The person the notes are leaving.
+            item_ids: Which notes. Ones not currently linked to the source are
+                ignored rather than being an error.
+            into_id: An existing person to move them to.
+            into_name: A new name to move them to. Ignored if `into_id` is set.
+
+        Returns:
+            What happened, or None if the source or target could not be
+            resolved.
+        """
+        if not item_ids:
+            return None
+
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                SELECT id::text, type::text, name, aliases
+                  FROM {settings.db_schema}.entities
+                 WHERE user_id = %s AND id = %s
+                """,
+                (user_id, source_id),
+            )
+            columns = [c.name for c in result.description or []]
+            row = await result.fetchone()
+            if row is None:
+                return None
+            source = dict(zip(columns, row))
+
+            if into_id:
+                if into_id == source_id:
+                    return None
+                found = await conn.execute(
+                    f"""
+                    SELECT id::text, type::text, name, aliases
+                      FROM {settings.db_schema}.entities
+                     WHERE user_id = %s AND id = %s
+                    """,
+                    (user_id, into_id),
+                )
+                target_row = await found.fetchone()
+                if target_row is None:
+                    return None
+                target = dict(zip(columns, target_row))
+            else:
+                name = " ".join((into_name or "").split())
+                if not name:
+                    return None
+                if _normalized(name) == _normalized(source["name"]):
+                    return None
+                created = await conn.execute(
+                    f"""
+                    INSERT INTO {settings.db_schema}.entities
+                      (user_id, type, name, aliases)
+                    VALUES (%s, %s, %s, '[]'::jsonb)
+                    ON CONFLICT (user_id, type, name)
+                      DO UPDATE SET name = EXCLUDED.name
+                    RETURNING id::text, type::text, name, aliases
+                    """,
+                    (user_id, source["type"], name),
+                )
+                target = dict(zip(columns, await created.fetchone()))
+
+            # Only links that are actually the source's, and only for items
+            # this user owns — a note id from somewhere else moves nothing.
+            moved = await conn.execute(
+                f"""
+                UPDATE {settings.db_schema}.links l
+                   SET entity_id = %(target)s
+                 WHERE l.entity_id = %(source)s
+                   AND l.item_id = ANY(%(items)s::uuid[])
+                   AND EXISTS (
+                       SELECT 1 FROM {settings.db_schema}.items i
+                        WHERE i.id = l.item_id AND i.user_id = %(user_id)s)
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM {settings.db_schema}.links x
+                        WHERE x.item_id = l.item_id
+                          AND x.entity_id = %(target)s
+                          AND x.relation = l.relation)
+                """,
+                {
+                    "target": target["id"],
+                    "source": source_id,
+                    "items": list(item_ids),
+                    "user_id": user_id,
+                },
+            )
+            moved_count = moved.rowcount or 0
+
+            # A note already linked to both is not moved above; leaving it on
+            # the source would keep it on a page it was just taken off.
+            await conn.execute(
+                f"""
+                DELETE FROM {settings.db_schema}.links l
+                 WHERE l.entity_id = %(source)s
+                   AND l.item_id = ANY(%(items)s::uuid[])
+                """,
+                {"source": source_id, "items": list(item_ids)},
+            )
+
+            kept, alias_moved = aliases_after_split(
+                list(source["aliases"]), target["name"], list(target["aliases"])
+            )
+            if alias_moved:
+                await conn.execute(
+                    f"""
+                    UPDATE {settings.db_schema}.entities
+                       SET aliases = %s
+                     WHERE id = %s AND user_id = %s
+                    """,
+                    (Json(kept), source_id, user_id),
+                )
+
+            remaining = await conn.execute(
+                f"SELECT count(*) FROM {settings.db_schema}.links WHERE entity_id = %s",
+                (source_id,),
+            )
+            left = (await remaining.fetchone())[0]
+
+            source_removed = False
+            if left == 0:
+                # Everything moved. What is left is a name with nothing behind
+                # it, which is clutter rather than data — the notes are all
+                # still there, on the other page.
+                await conn.execute(
+                    f"""
+                    DELETE FROM {settings.db_schema}.entities
+                     WHERE id = %s AND user_id = %s
+                    """,
+                    (source_id, user_id),
+                )
+                source_removed = True
+
+        return {
+            "source_id": source_id,
+            "source_removed": source_removed,
+            "target_id": target["id"],
+            "target_name": target["name"],
+            "target_created": into_id is None,
+            "moved": moved_count,
+            "aliases_moved": alias_moved,
+        }
 
     async def list_people(
         self, user_id: str, query: Optional[str] = None, limit: int = 200

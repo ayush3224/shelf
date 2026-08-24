@@ -160,11 +160,13 @@ because a wrong merge is silent and a wrong split is visible.*
 
 *People takes the fourth tab (D44), and four is written down as the ceiling.*
 
-**Still outstanding:** no way to correct a person by hand — merge, split,
-rename, or move a note off the wrong page (O6). Deliberately unbuilt: none of
-UC45-47 asks for it, and what it should look like depends on which of the three
-ways a bad row can appear actually turns up in use. And, as ever, none of this
-has been touched on a phone.
+*Manual correction followed the same day: **UC48 merge** and **UC49 split**,
+both on the person page, closing O6. That inverts what the resolution rules are
+for — with a correction path they only need to be recoverable, not right, so
+D43 is deliberately left as it is rather than tuned (D45). The machine files,
+the owner adjudicates.*
+
+**Still outstanding:** as ever, none of this has been touched on a phone.
 
 ---
 

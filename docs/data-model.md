@@ -99,6 +99,13 @@ renamed, keeping "Priya" in `aliases` so the earlier mentions stay attached.
 `aliases` is therefore load-bearing rather than decorative — it is both how
 past mentions survive a rename and what UC47's search matches on.
 
+**Both operations that correct a resolution move aliases too** (UC48, UC49,
+D45). A merge takes the absorbed person's name as an alias, or the next mention
+would recreate the row just folded away. A split gives up any alias that names
+the target, or the next bare mention resolves straight back onto the row just
+corrected. Neither reads the notes to decide: they match names, and identity is
+the owner's call.
+
 > Creating `entities` and `links` in the first migration is deliberate.
 > The graph UI is P2, but retrofitting these tables after months of
 > items exist means a backfill pass over every note. Cheap now,
