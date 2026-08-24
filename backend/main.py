@@ -561,7 +561,7 @@ async def _write_split(
         return []
 
     written = [_captured(item_id, parts[0])]
-    await _link_people(db, user_id, item_id, parts[0].entities)
+    await _link_people(db, user_id, item_id, parts[0])
 
     for part in parts[1:]:
         try:
@@ -584,13 +584,13 @@ async def _write_split(
             logger.warning("Could not write a split sibling of %s: %s", item_id, e)
             continue
         written.append(_captured(sibling_id, part))
-        await _link_people(db, user_id, sibling_id, part.entities)
+        await _link_people(db, user_id, sibling_id, part)
 
     return written
 
 
 async def _link_people(
-    db: Database, user_id: str, item_id: str, entities: list[dict[str, str]]
+    db: Database, user_id: str, item_id: str, parsed: ParseResult
 ) -> None:
     """Attach a written item to the people it named (UC45).
 
@@ -599,19 +599,50 @@ async def _link_people(
     words still in it; failing the request here would trade the thing that
     cannot be reproduced for the thing that can be recomputed later.
 
+    Called on **every** written item, of every kind. A task that names somebody
+    is a fact about them as well as a thing to do, and `kind` is not allowed to
+    decide which of the two survives — the item goes on the Shelf and on the
+    person's page at once, which is what `links` was always for.
+
+    Takes the whole `ParseResult` rather than its entities, because the check
+    at the end needs the kind as well: a capture the model called a
+    `person_note` and then named nobody in is the exact shape of a silent
+    extraction failure, and it is invisible unless something says so.
+
     Args:
         db: Database connection.
         user_id: Owner.
         item_id: The item just written.
-        entities: `{type, name}` from the parse.
+        parsed: The parse this item came from.
     """
+    entities = parsed.entities
+    named = [e for e in entities if e.get("type") == "person"]
+
     if not entities:
+        # Classification said this was about somebody and extraction produced
+        # nobody. Nothing downstream can tell that apart from a capture with no
+        # people in it, so the log is the only place it shows (bug, 24 August
+        # 2026: the audio route linked nothing at all and looked exactly like
+        # this from the outside).
+        if parsed.kind == "person_note":
+            logger.warning(
+                "Item %s parsed as person_note but named nobody: %r",
+                item_id,
+                parsed.text,
+            )
         return
     try:
         linked = await db.link_entities(user_id, item_id, entities)
     except Exception as e:
         logger.warning("Could not link people for item %s: %s", item_id, e)
         return
+
+    if named and not any(entry.get("type") == "person" for entry in linked):
+        logger.warning(
+            "Item %s named %s but produced no person entity",
+            item_id,
+            ", ".join(repr(e.get("name")) for e in named),
+        )
 
     # An ambiguous name got its own row rather than being guessed onto an
     # existing one. Worth a line in the log: it is the case a human may want
@@ -709,7 +740,7 @@ async def capture(
                 kind="task",
             )
         written = [_captured(item_id, parsed)]
-        await _link_people(db, user_id, item_id, parsed.entities)
+        await _link_people(db, user_id, item_id, parsed)
 
     head = written[0]
     return CaptureResponse(
@@ -895,6 +926,14 @@ async def capture_audio(
             logger.warning("Could not store parse for item %s: %s", item_id, e)
             return _failed()
         written = [_captured(item_id, parsed)]
+        # This call is the one that was missing, and its absence is why a live
+        # "Swati likes Pansy" classified perfectly and left `entities` empty
+        # while the text route linked the same words fine. `_write_split` links
+        # its own items and `/capture` links here, so the single-item audio
+        # capture — the only path a phone ever takes — was the one branch of
+        # four that wrote a row and no link. The route tests never caught it
+        # because their stub parse returns no entities at all.
+        await _link_people(db, user_id, item_id, parsed)
 
     # A transcript we do not trust is parsed anyway, then flagged. This is the
     # use D13 reserved for `needs_review` and never had one for.

@@ -50,6 +50,7 @@ class StubDb(Database):
         self.parses: list[dict[str, Any]] = []
         self.statuses: list[tuple[str, str]] = []
         self.audio_paths: dict[str, Optional[str]] = {}
+        self.linked: list[dict[str, Any]] = []
         self.next_id = 0
 
     def _id(self) -> str:
@@ -74,6 +75,20 @@ class StubDb(Database):
 
     async def item_audio_path(self, item_id: str, user_id: str) -> Optional[str]:
         return self.audio_paths.get(item_id)
+
+    async def link_entities(
+        self, user_id: str, item_id: str, entities: Any
+    ) -> list[dict[str, Any]]:
+        self.linked.append({"item_id": item_id, "entities": list(entities)})
+        return [
+            {
+                "id": f"entity-{e['name']}",
+                "name": e["name"],
+                "type": e["type"],
+                "ambiguous": False,
+            }
+            for e in entities
+        ]
 
 
 def parsed(**overrides: Any) -> ParseResult:
@@ -415,3 +430,134 @@ def test_audio_url_requires_a_token(client, db):
     """The bucket holds the user's voice; the item id is not the credential."""
     response = client.get("/items/00000000-0000-4000-8000-000000000001/audio")
     assert response.status_code == 401
+
+
+# ------------------------------------------------------- people on every route
+#
+# The gap these close is the one that shipped: `link_entities` was covered
+# against a real Postgres (`test_people_db.py`) and the parse was covered for
+# what it extracts, but nothing joined the two at the route — and the stub
+# parse here returned `entities: []`, so every one of these tests passed while
+# the audio route linked nothing at all. A live "Swati likes Pansy" came back
+# `kind=person_note`, `parse_status=ok`, and `entities` empty.
+#
+# So they are written per route rather than once: the bug was not in the
+# linking, it was in one of four branches forgetting to call it.
+
+
+def person(name: str) -> dict[str, str]:
+    return {"type": "person", "name": name}
+
+
+def test_a_voice_capture_links_the_people_it_named(client, db, stub_pipeline):
+    """The branch that was missing. A phone only ever takes this one."""
+    stub_pipeline(parse_result=parsed(kind="person_note", entities=[person("Swati")]))
+    body = post(client).json()
+
+    assert body["parse_status"] == "ok"
+    assert len(db.linked) == 1
+    assert db.linked[0]["entities"] == [person("Swati")]
+    assert db.linked[0]["item_id"] == body["id"]
+
+
+def test_a_typed_capture_links_the_people_it_named(client, db, stub_pipeline):
+    stub_pipeline(parse_result=parsed(kind="person_note", entities=[person("Swati")]))
+    client.post(
+        "/capture",
+        json={"text": "Swati likes pansies", "source": "text"},
+        headers=auth(),
+    )
+
+    assert len(db.linked) == 1
+    assert db.linked[0]["entities"] == [person("Swati")]
+
+
+def test_a_task_that_names_somebody_is_linked_too(client, db, stub_pipeline):
+    """`kind` does not get to choose. "Call Priya about the invoice" is a task
+    and a fact about Priya, and the item belongs on the Shelf and on her page
+    at the same time — which is what `links` was always for."""
+    stub_pipeline(
+        parse_result=parsed(
+            kind="task", text="Call Priya about the invoice", entities=[person("Priya")]
+        )
+    )
+    post(client)
+
+    assert db.linked and db.linked[0]["entities"] == [person("Priya")]
+
+
+def test_every_item_of_a_split_links_its_own_people(client, db, stub_pipeline):
+    """Two items out of one recording, each naming somebody different."""
+    stub_pipeline(
+        parse_result=parsed(split=True),
+        split_result=[
+            parsed(text="Call Priya", entities=[person("Priya")]),
+            parsed(
+                text="Swati likes pansies",
+                kind="person_note",
+                due_at=None,
+                entities=[person("Swati")],
+            ),
+        ],
+    )
+    body = post(client).json()
+
+    assert [call["entities"] for call in db.linked] == [
+        [person("Priya")],
+        [person("Swati")],
+    ]
+    assert [call["item_id"] for call in db.linked] == [i["id"] for i in body["items"]]
+
+
+def test_a_capture_naming_nobody_does_not_call_the_linker(client, db, stub_pipeline):
+    stub_pipeline()
+    post(client)
+    assert db.linked == []
+
+
+def test_a_capture_survives_a_linker_that_will_not_write(
+    client, db, stub_pipeline, monkeypatch
+):
+    """Linking is enrichment, never a gate (D6, UC42). The words are the part
+    that cannot be recomputed; the links can be redone by hand (UC48, UC49)."""
+    stub_pipeline(parse_result=parsed(entities=[person("Swati")]))
+
+    async def boom(*args: Any, **kwargs: Any):
+        raise RuntimeError("postgres is down")
+
+    monkeypatch.setattr(db, "link_entities", boom)
+    body = post(client).json()
+
+    assert body["parse_status"] == "ok"
+    assert body["transcript"] == "call the bank"
+
+
+def test_a_person_note_that_named_nobody_says_so(client, db, stub_pipeline, caplog):
+    """The live symptom, made visible. Classification worked and extraction did
+    not, and from the outside that is indistinguishable from a capture with no
+    people in it — so the log is the only place it can show."""
+    stub_pipeline(parse_result=parsed(kind="person_note", text="Swati likes Pansy"))
+    with caplog.at_level("WARNING"):
+        post(client)
+
+    assert db.linked == []
+    assert any(
+        "parsed as person_note but named nobody" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_a_named_person_that_resolves_to_nothing_says_so(
+    client, db, stub_pipeline, caplog, monkeypatch
+):
+    """The other half: the parse named somebody and no entity came back."""
+    stub_pipeline(parse_result=parsed(entities=[person("Swati")]))
+
+    async def links_nothing(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        return []
+
+    monkeypatch.setattr(db, "link_entities", links_nothing)
+    with caplog.at_level("WARNING"):
+        post(client)
+
+    assert any("produced no person entity" in r.getMessage() for r in caplog.records)
