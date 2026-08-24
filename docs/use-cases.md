@@ -63,7 +63,7 @@ that history at something else.
 |----|----------|-----|
 | UC30 | Weekly review as a swipe deck — four directions, four states. **Bounded to what carries a decision**: what decayed this week and what is about to drop (owner's decision, 24 August 2026, D50) | P1 |
 | UC31 | Weekly digest of what decayed and what's about to drop — **and what you completed and what was dropped**, as counts with expandable lists (widened by the owner 24 August 2026, D50). Those two are summary, not decisions, and never become cards | P1 |
-| UC32 | Daily `Today` list, bounded to due and overdue | P0 |
+| UC32 | Daily `Today` screen. The list proper stays bounded to due and overdue, and stays the thing that has to be finishable; below it a separate **`Later`** block holds active items dated further out, which before 24 August 2026 were on no screen at all (D56) | P0 |
 
 ## Retrieval
 

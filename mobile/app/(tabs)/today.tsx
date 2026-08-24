@@ -1,15 +1,24 @@
 /**
- * `Today` (UC32) — due and overdue only, and tap to finish (UC16).
+ * `Today` (UC32) — what is due, what is coming, and tap to finish (UC16).
  *
- * The bound is the server's, not a filter here: the list has to be finishable,
- * and the way it stops being finishable is by quietly widening.
+ * Two blocks, one screen (D56). The top one is due and overdue: bounded by the
+ * server, not filtered here, because the list has to be finishable and the way
+ * it stops being finishable is by quietly widening. Below it, under a header,
+ * sits everything active whose time is still ahead — which before this was on
+ * no screen in the app at all.
+ *
+ * The separation is doing real work, not decoration. The count in the header,
+ * the empty state and the phrase "Today is finished" all key off the top block
+ * alone, so a screen with nine things next month on it still says the day is
+ * done when the day is done. `Later` is a preview you read; only the block
+ * above it is work you are being asked to clear.
  */
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
-  FlatList,
   Pressable,
   RefreshControl,
+  SectionList,
   StyleSheet,
   Text,
   View,
@@ -22,6 +31,7 @@ import type { TodayItem } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { usePlayback } from '../../lib/playback';
 import { dueLabel } from '../../lib/time';
+import { showHeaders, todaySections } from '../../lib/today';
 import { color, radius, space } from '../../lib/theme';
 
 type RowProps = {
@@ -89,6 +99,8 @@ export default function Today() {
   const { signOut } = useAuth();
   const playback = usePlayback();
   const [items, setItems] = useState<TodayItem[]>([]);
+  const [later, setLater] = useState<TodayItem[]>([]);
+  const [truncated, setTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -100,6 +112,10 @@ export default function Today() {
       try {
         const data = await today();
         setItems(data.items);
+        // `?? []` and not a hard read: a phone running against a server that
+        // predates the split should show the due block rather than crash.
+        setLater(data.later ?? []);
+        setTruncated(data.later_truncated ?? false);
       } catch (e) {
         if (e instanceof ApiError && e.isAuthError) {
           await signOut();
@@ -123,10 +139,16 @@ export default function Today() {
 
   const done = useCallback(
     async (id: string) => {
-      const previous = items;
+      const previous = { items, later };
       // Optimistic: the tap is the whole interaction, so it should not wait on
       // a round trip. A failure puts the row back and says so.
-      setItems((current) => current.filter((i) => i.id !== id));
+      //
+      // Both blocks, because the circle is on every row: finishing something
+      // early is a legitimate thing to do to a `Later` item and refusing it
+      // would be admin work in the one place this app promises none (UC16).
+      const without = (current: TodayItem[]) => current.filter((i) => i.id !== id);
+      setItems(without);
+      setLater(without);
       if (playback.activeId === id) playback.stop();
       setError(null);
       try {
@@ -136,14 +158,23 @@ export default function Today() {
           await signOut();
           return;
         }
-        setItems(previous);
+        setItems(previous.items);
+        setLater(previous.later);
         setError(
           e instanceof ApiError ? `${e.message} Not marked done.` : 'Not marked done.',
         );
       }
     },
-    [items, signOut, playback],
+    [items, later, signOut, playback],
   );
+
+  const sections = useMemo(() => todaySections(items, later), [items, later]);
+  const headers = showHeaders(sections);
+
+  // Said out loud even though the list below is not empty. The day being
+  // finished is the thing this screen exists to be able to tell you, and a
+  // `Later` block filling the space would otherwise silently swallow it.
+  const cleared = items.length === 0 && later.length > 0;
 
   if (loading) {
     return (
@@ -166,9 +197,10 @@ export default function Today() {
         <Text style={styles.error}>{error ?? playback.error}</Text>
       ) : null}
 
-      <FlatList
-        data={items}
+      <SectionList
+        sections={sections}
         keyExtractor={(item) => item.id}
+        stickySectionHeadersEnabled={false}
         renderItem={({ item }) => (
           <Row
             item={item}
@@ -179,7 +211,30 @@ export default function Today() {
             loadingAudio={playback.activeId === item.id && playback.loading}
           />
         )}
-        contentContainerStyle={items.length === 0 ? styles.emptyWrap : styles.list}
+        renderSectionHeader={({ section }) =>
+          headers ? (
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>{section.title}</Text>
+              <Text style={styles.sectionCount}>{section.data.length}</Text>
+            </View>
+          ) : null
+        }
+        ListHeaderComponent={
+          cleared ? (
+            <View style={styles.cleared}>
+              <Text style={styles.clearedTitle}>Nothing due.</Text>
+              <Text style={styles.clearedBody}>Today is finished.</Text>
+            </View>
+          ) : null
+        }
+        ListFooterComponent={
+          truncated ? (
+            <Text style={styles.footnote}>
+              More further out than fits here — search the shelf for it.
+            </Text>
+          ) : null
+        }
+        contentContainerStyle={sections.length === 0 ? styles.emptyWrap : styles.list}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
@@ -226,6 +281,29 @@ const styles = StyleSheet.create({
     color: color.danger,
   },
   list: { paddingHorizontal: space.lg, paddingBottom: space.xl, gap: space.sm },
+  sectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: space.sm,
+    paddingTop: space.md,
+  },
+  sectionTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+    color: color.faint,
+    textTransform: 'uppercase',
+  },
+  sectionCount: { fontSize: 13, color: color.faint },
+  cleared: { paddingTop: space.sm, gap: space.xs },
+  clearedTitle: { fontSize: 18, fontWeight: '600', color: color.text },
+  clearedBody: { fontSize: 15, lineHeight: 22, color: color.muted },
+  footnote: {
+    paddingTop: space.md,
+    fontSize: 13,
+    lineHeight: 19,
+    color: color.faint,
+  },
   flagged: { fontSize: 12, fontWeight: '600', color: color.muted },
   play: {
     width: 36,

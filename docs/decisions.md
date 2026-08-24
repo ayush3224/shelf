@@ -724,6 +724,86 @@ and the calendar agreeing afterwards.
 The recreate does not reset `attempts`, so a pathological create-delete loop
 stops after `GOOGLE_CALENDAR_MAX_ATTEMPTS` rather than running forever.
 
+---
+
+**D56 — `Today` gains a `Later` block. An item is never on no screen.**
+*24 August 2026.*
+
+*The hole.* `Today` showed active items due before the end of the day. The
+Shelf showed everything that is **not** active. An active item due tomorrow
+was in neither — no list, no tab, nothing. It was reachable only by search,
+and only if you already knew it existed. This had been true since session 3
+and surfaced on 24 August 2026, the first time a capture was given a future
+date; two items due the next morning were written to the calendar, pushed at
+the right time, and visible nowhere in the app that owns them.
+
+Worth being precise about why it lasted: every screen was individually correct.
+`Today` was correctly bounded, the Shelf was correctly "not active", and the
+gap only exists in the space between two correct definitions. A test of either
+one passes throughout. So the property is now asserted directly, against a real
+Postgres — *every active timed item is on exactly one of the two lists* — which
+is a statement neither query can make on its own (`tests/test_today_db.py`).
+
+*Where they belong: `Today`, under a heading.* Not the Shelf. The Shelf is
+ordered by capture time on purpose (D38) because it is an archive of what you
+have said; a thing due next Tuesday is not archive, it is a commitment, and it
+belongs in date order next to the other commitments. `Today` is where the app
+already answers "what have I agreed to and when".
+
+*But `Today` must stay finishable* — constraint 3, and the one this change is
+most at risk of breaking. So the blocks are separate at every level that
+matters, not merely visually:
+
+- The server returns two lists, not one list with a flag. `items` keeps its
+  bound; `later` is a second query. A single list is one careless edit away
+  from losing the bound that is the whole design.
+- The count in the header, the empty state, and the words "Today is finished"
+  key off `items` alone. A screen with nine things next month on it still says
+  the day is done when the day is done — and says it *above* the `Later` block
+  rather than instead of it.
+- `Later` is a preview you read, not work you are being asked to clear. That is
+  what makes its length cost reading rather than finishing.
+
+*`Later` gets no horizon, deliberately.* Capping it at a week or a month was
+the obvious move and is wrong: it leaves the same bug in a narrower form, with
+anything dated beyond the cap back on no screen at all. The reason `Today`
+needs a bound does not transfer to a block that is not a to-do list. There is a
+row limit, and when it bites the screen says so — a silently truncated list
+reads as a complete one.
+
+*The Shelf is unchanged.* Its `Active` chip already existed for the case where
+you want to see active items in the archive, so nothing there needed widening.
+
+---
+
+**D57 — The capture toast names the place the item actually went.**
+*24 August 2026.*
+
+The acknowledgement said "Saved — it's on Today" for anything `active`. For a
+future-dated capture that named a screen the item was not on, and — until D56 —
+there was no true thing it could have said instead.
+
+`active` alone was never enough to answer the question. An item due next
+Tuesday is exactly as `active` as one due in an hour and lands somewhere else,
+so the placement is now derived from the state **and** the time, by the same
+cut-off the server splits on. Three destinations, and only three: `Today`,
+`Later`, the shelf.
+
+*The date is said out loud*, not just the block: "Saved — it's under Later, due
+tomorrow." Naming the place alone would confirm a location while leaving unsaid
+the thing actually worth confirming, which is that the date the parse heard is
+the date you said. That is the smallest useful form of the echo-back O3 keeps
+declining to build in full — it costs one word, and it is the word that catches
+a misheard day.
+
+*A split (UC4) is counted per destination* — "Saved 3 things — 1 on Today, 1
+under Later, 1 on the shelf" — because "saved 3 things" over a silent scatter
+across two blocks is the same missing information this line exists to supply.
+
+*The wording moved out of the screen into `lib/landing.ts`.* It is the one
+sentence the owner reads after every single capture, it has now been wrong
+once, and it was untestable where it was.
+
 
 ## Open
 
@@ -777,10 +857,15 @@ understood ("Got it — call insurance, Tuesday 3pm") or stay silent and
 trust the parse? Echo catches errors but taxes every single capture.
 Leaning silent, with a correction affordance in `Today` instead.
 *Phase 1 ships the middle option:* the capture screen says where the item
-landed ("Saved — it's on Today", "Saved to the shelf") but not what the model
-thought it heard. That is state being announced, not the parse being echoed.
-Still open, because the correction affordance it leans on is UC38 and is not
-built yet.
+landed ("Saved — it's on Today", "Saved — it's on the shelf") but not what
+the model thought it heard. That is state being announced, not the parse being
+echoed. *Widened on 24 August 2026 (D57):* the line now also names the **day**
+for a future-dated item, which is the one piece of the parse cheap enough to
+confirm every time.
+Still open — but no longer for the reason first given here. The correction
+affordance it leans on is UC38, and that shipped in session 1; what is still
+unanswered is whether a fuller echo would earn its tax now that there is
+somewhere to act on it.
 
 **O4 — Hinglish transcription quality. CLOSED, 23 August 2026.**
 Closed because the premise is gone, not because it was answered: the user

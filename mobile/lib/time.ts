@@ -5,15 +5,25 @@ const time = new Intl.DateTimeFormat(undefined, {
   minute: '2-digit',
 });
 
+const dayMonth = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short' });
+
 function startOfDay(d: Date): number {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
 }
 
+const weekdayOnly = new Intl.DateTimeFormat(undefined, { weekday: 'long' });
+
 /**
  * A short, human due label relative to now.
  *
- * `Today` only ever holds due and overdue items, so this covers today and the
- * past — anything else would mean the server's bound is wrong.
+ * Covers the future as well as the past, because `Today` now carries both
+ * (D56): due and overdue in the top block, still-to-come under `Later`.
+ *
+ * The two halves are shaped differently on purpose. Backwards, the clock time
+ * stops mattering once something is a week late and the label collapses to
+ * "3 weeks ago". Forwards it never stops mattering — a time is the whole
+ * content of an upcoming item — so every future label keeps its clock, and
+ * only the day part gets shorter as it gets further away.
  */
 export function dueLabel(dueAt: string, now: Date = new Date()): string {
   const due = new Date(dueAt);
@@ -23,6 +33,19 @@ export function dueLabel(dueAt: string, now: Date = new Date()): string {
   const clock = time.format(due);
 
   if (days === 0) return clock;
+
+  if (days < 0) {
+    const ahead = -days;
+    if (ahead === 1) return `Tomorrow, ${clock}`;
+    // Inside the coming week a weekday names itself unambiguously; past that
+    // "Tuesday" could be either of two, so it becomes a date.
+    if (ahead < 7) return `${weekdayOnly.format(due)}, ${clock}`;
+    if (due.getFullYear() === now.getFullYear()) {
+      return `${dayMonth.format(due)}, ${clock}`;
+    }
+    return `${dayMonth.format(due)} ${due.getFullYear()}, ${clock}`;
+  }
+
   if (days === 1) return `Yesterday, ${clock}`;
   if (days < 7) return `${days} days ago, ${clock}`;
   if (days < 30) {
@@ -33,6 +56,27 @@ export function dueLabel(dueAt: string, now: Date = new Date()): string {
   return `${months} month${months === 1 ? '' : 's'} ago`;
 }
 
+
+/**
+ * The day part of a due time, as a bare phrase for the capture toast (D57).
+ *
+ * Lowercase and unpunctuated so it drops into a sentence — "Saved for
+ * tomorrow" — and without a clock time, which is detail the acknowledgement
+ * does not need. Empty for an item with no time at all; that one is on the
+ * shelf and the toast says so instead.
+ */
+export function dueDayPhrase(dueAt: string | null, now: Date = new Date()): string {
+  if (!dueAt) return '';
+  const due = new Date(dueAt);
+  if (Number.isNaN(due.getTime())) return '';
+
+  const ahead = Math.round((startOfDay(due) - startOfDay(now)) / 86_400_000);
+  if (ahead <= 0) return 'today';
+  if (ahead === 1) return 'tomorrow';
+  if (ahead < 7) return weekdayOnly.format(due);
+  if (due.getFullYear() === now.getFullYear()) return dayMonth.format(due);
+  return `${dayMonth.format(due)} ${due.getFullYear()}`;
+}
 
 const fullDateTime = new Intl.DateTimeFormat(undefined, {
   weekday: 'short',
@@ -64,7 +108,6 @@ export function capturedLabel(createdAt: string): string {
 }
 
 
-const dayMonth = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short' });
 
 /**
  * When something was captured, for a Shelf row.

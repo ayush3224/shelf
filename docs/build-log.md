@@ -169,7 +169,7 @@ off-site copy is still worth adding.
 | JWT auth, fail-closed | ✅ `/health` is the only public path |
 | Text capture + Haiku parse | ✅ kind, due date, critical, entities |
 | Timezone handling (IST) | ✅ tested — "tomorrow 3pm" → 09:30Z |
-| `GET /items/today`, `POST /items/{id}/done` | ✅ live |
+| `GET /items/today`, `POST /items/{id}/done` | ✅ live — two blocks since D56: due/overdue, and `Later` |
 | Item detail, edit, move, delete (UC37/38/21/39) | ✅ verified live |
 | Scheduler tick (`shelf-tick.timer`, 1 min) | ✅ live under systemd, one log line per tick |
 | Auto-shelve on ignores/snoozes (UC18) | ✅ verified against the real DB and clock |
@@ -183,8 +183,8 @@ off-site copy is still worth adding.
 | Audio stored + signed playback (UC7) | ✅ verified live, byte-identical |
 | Cloud transcription (UC8) | ✅ verified live — Groq turbo, 1.6s round trip |
 | Multi-item splitting (UC4) | ⚠️ built, never run against real Haiku |
-| Mobile test suite (jest-expo) | ✅ 182 tests, incl. real-tree renders behind a 48dp inset |
-| Backend test suite | ✅ 365 tests, plus 151 opt-in `-m db` on their own schema |
+| Mobile test suite (jest-expo) | ✅ 199 tests, incl. real-tree renders behind a 48dp inset |
+| Backend test suite | ✅ 371 tests, plus 157 opt-in `-m db` on their own schema |
 | Native dep tree vs SDK 57 matrix | ✅ reconciled, `expo-doctor` 21/21 |
 | Google OAuth redirect handling | ✅ callback swallowed, not routed |
 | Google Calendar credential | ✅ service account, calendar shared to it (D52) — no OAuth flow |
@@ -202,6 +202,8 @@ off-site copy is still worth adding.
 | A digest notification actually on the phone | ❌ first real one due Sunday 09:00 IST |
 | Calendar write, update, delete (UC43) | ✅ verified end to end against the real calendar through the deployed tick |
 | Calendar sync is trigger-driven | ✅ migration 007; no request path calls Google |
+| A future-dated item is on a screen (UC32, D56) | ✅ `Later` block, verified live against the two real captures |
+| The capture toast names where it went (D57) | ✅ Today / Later + the day / the shelf |
 | Session 5 — UC14 delivery half | ❌ not started |
 
 ## 7. Pending — immediate
@@ -1910,3 +1912,85 @@ real test of "everything already captured appears too" has not happened.
 actually changes, given that it is already parsed and currently changes
 nothing.
 
+---
+
+## Session 5b — the screen nothing was on *(24 August 2026)*
+
+Not planned work. A bug report from the first future-dated capture the app has
+ever received, and it turned out to be two.
+
+**An active item due on a future day was on no screen.** `Today` filters to
+items due before the end of the day. The Shelf filters to everything that is
+*not* `active`. An item due tomorrow is neither — it existed, it was pushed at
+the right time, it was on the calendar, and inside the app that owns it there
+was nowhere to see it. True since session 3, invisible until now because every
+capture before this one was either undated or due the same day.
+
+The instructive part is *why it survived*. Every screen was individually
+correct: `Today` was correctly bounded (that bound is design constraint 3), the
+Shelf was correctly "not active", and the hole exists only in the space between
+two correct definitions. No test of either could have caught it, and none did.
+So the property is now asserted where it actually lives — against a real
+Postgres, over both queries at once: **every active timed item is on exactly
+one of the two lists** (`tests/test_today_db.py`). The boundary sweep in that
+file puts a row an hour either side of midnight and one exactly on it.
+
+**They belong on `Today`, under a heading** (D56). Not the Shelf: the Shelf is
+ordered by capture time on purpose (D38) because it is an archive of things you
+have said, and a commitment for next Tuesday is not archive. `Today` is already
+the screen that answers "what have I agreed to, and when".
+
+The risk in that is obvious — constraint 3 says `Today` must stay finishable —
+so the split is structural rather than cosmetic. The server returns **two
+lists, not one list with a flag**, so the bound on the first cannot be lost by
+an edit to the second. The header count, the empty state and the words "Today
+is finished" all key off the due block alone, which means a screen with nine
+things next month on it still tells you the day is done, *above* the `Later`
+block rather than instead of it.
+
+**`Later` has no horizon, and that was the one real judgement call.** Capping
+it at a week was the tidy answer and it is wrong: it leaves the same bug in a
+narrower form, with anything dated past the cap back on no screen. The reason
+`Today` needs a bound — it is a list you have to be able to clear — does not
+apply to a block that is a preview. There is a row limit, and when it bites the
+screen says so rather than going quiet, because a truncated list reads as a
+complete one.
+
+**The second bug was the toast, and it was the same mistake.** Every capture is
+acknowledged with where it landed (O3's middle option). That line read `active`
+and said "it's on Today", which for a future date named a screen the item was
+not on — and before the fix above, there was no true thing it could have said.
+`active` was never enough to answer: an item due next Tuesday is exactly as
+`active` as one due in an hour. It now derives the destination from the state
+**and** the time, by the same cut-off the server splits on, and names the day
+as well as the block: *"Saved — it's under Later, due tomorrow."* (D57).
+
+Saying the day is the small useful piece of echo-back that O3 keeps declining
+to build in full — one word, and it is the word that catches a misheard date. A
+split (UC4) is now counted per destination too, because "saved 3 things"
+followed by a silent scatter across two blocks is the same missing information
+the line exists to supply.
+
+The wording moved out of the screen into `lib/landing.ts`. It is the one
+sentence the owner reads after every capture, it has now been wrong once, and
+where it was it could not be tested.
+
+**Verified live.** Against the running API with the owner's own token: before
+the restart the endpoint returned an empty `Today` while two real items sat due
+the next morning; after it, both come back under `later`, neither flagged
+overdue. 199 mobile tests, 371 backend, 157 `-m db` — all green.
+
+**Also confirmed, since it was asked in the same breath:** both of those items
+*are* on the calendar. `calendar_links` has them `synced` with no errors and
+zero retries, and fetching the two event ids straight from Google returns them
+`confirmed` at 08:30 IST on 25 August, each carrying the `shelf_item_id` that
+points back at its row. Worth noticing that they are near-duplicates — *"Clip
+Zahvi's nails"* and *"Clip Zehvi's nails"*, captured 85 seconds apart, same
+minute due. The app is behaving correctly; the calendar has the same
+appointment on it twice, and UC13 (detect a reference to an existing item) is
+the P2 that would have caught it.
+
+**Still the same last hop:** none of this has been seen on a phone. `Later` is
+a new section on the one screen whose emptiness is the point, and whether
+"Nothing due. Today is finished." still reads as finished with a block
+underneath it is a thumb question, not an argument.

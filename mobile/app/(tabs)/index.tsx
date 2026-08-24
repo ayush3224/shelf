@@ -10,7 +10,9 @@
  *
  * The acknowledgement says where the item landed, not what the model thought
  * it heard — echoing the parse back taxes every single capture, and the place
- * to correct a bad parse is `Today` (O3).
+ * to correct a bad parse is `Today` (O3). The wording of it lives in
+ * `lib/landing`, because "where it landed" has to name a place that exists and
+ * that turned out to be worth testing (D57).
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -29,6 +31,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { ApiError, capture, captureAudio } from '../../lib/api';
 import type { CaptureResponse } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
+import { landedMessage } from '../../lib/landing';
 import { MIN_RECORDING_MS, useRecorder } from '../../lib/recorder';
 import { color, radius, space } from '../../lib/theme';
 
@@ -36,29 +39,6 @@ const NOTICE_MS = 6000;
 
 /** Drag this far from the mic and releasing throws the recording away. */
 const CANCEL_DISTANCE = 80;
-
-/** Where the capture went, in one line. State is announced, never silent. */
-function landedMessage(result: CaptureResponse): string {
-  if (result.parse_status === 'failed') {
-    return "Saved. Couldn't read it — it's on the shelf, with your words kept.";
-  }
-
-  const items = result.items ?? [];
-  if (items.length > 1) {
-    // UC4: say how many things came out of one note, because the count is the
-    // part that would otherwise be a surprise on `Today`.
-    const onToday = items.filter((item) => item.state === 'active').length;
-    const heard = `Saved ${items.length} things`;
-    const where = onToday === 0 ? 'to the shelf.' : `— ${onToday} on Today.`;
-    return `${heard} ${where}`;
-  }
-
-  const landed = result.state === 'active' ? "it's on Today" : 'to the shelf';
-  if (result.parse_status === 'needs_review') {
-    return `Saved ${landed} — the words were hard to make out, so check it.`;
-  }
-  return result.state === 'active' ? "Saved — it's on Today." : 'Saved to the shelf.';
-}
 
 function seconds(ms: number): string {
   return `${Math.floor(ms / 1000)}s`;

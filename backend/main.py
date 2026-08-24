@@ -230,10 +230,25 @@ class TodayItem(BaseModel):
 
 
 class TodayResponse(BaseModel):
-    """Response for GET /items/today."""
+    """Response for GET /items/today.
+
+    Two lists, not one (D56). `items` is the finishable part — due and
+    overdue — and is what the screen counts and what "Today is finished"
+    means. `later` is everything active with a time still ahead of it: not
+    work for now, but it has to be *somewhere*, and before this it was on no
+    screen in the app.
+
+    They are kept apart here rather than concatenated with a flag because the
+    bound on `items` is a design constraint, and a single list is one careless
+    change away from losing it.
+    """
 
     as_of: datetime
     items: list[TodayItem]
+    later: list[TodayItem] = Field(default_factory=list)
+    #: Whether `later` was cut short by the page limit. Said out loud rather
+    #: than left implicit: a silently truncated list reads as a complete one.
+    later_truncated: bool = False
 
 
 class DigestItem(BaseModel):
@@ -1128,18 +1143,25 @@ async def items_today(
     db: Database = Depends(get_db),
     user_id: str = Depends(current_user_id),
 ) -> TodayResponse:
-    """The `Today` list: active items due or overdue (UC32).
+    """The `Today` screen: what is due, and what is coming (UC32, D56).
 
-    Bounded to the end of the user's day in their timezone, not the server's
-    (D15) — the cut-off is a wall-clock notion and the server runs in UTC.
-    `Today` has to stay finishable; anything due later is not on it.
+    Two blocks from one request, split at the end of the user's day in their
+    timezone rather than the server's (D15) — the cut-off is a wall-clock
+    notion and the server runs in UTC. The same instant is the exclusive upper
+    bound of the first query and the inclusive lower bound of the second, so
+    an active timed item is on exactly one of the two lists and never on
+    neither, which is the bug this route used to have.
+
+    `items` stays bounded, because that is the list that has to be finishable.
+    `later` is not bounded by time at all — it is a preview rather than work,
+    and a horizon on it would put far-dated items back where they were.
 
     Args:
         db: Database connection.
         user_id: Authenticated user, from the Supabase token.
 
     Returns:
-        Items ordered oldest-due first, each flagged `overdue` or not.
+        Due and overdue oldest-first, then upcoming soonest-first.
     """
     tz = capture_tz()
     now = datetime.now(tz)
@@ -1149,6 +1171,9 @@ async def items_today(
 
     try:
         rows = await db.today_items(user_id=user_id, before=end_of_day)
+        later, truncated = await db.upcoming_items(
+            user_id=user_id, at_or_after=end_of_day
+        )
     except Exception as e:
         logger.error("Failed to load Today for user %s: %s", user_id, e)
         raise HTTPException(status_code=500, detail="Failed to load items")
@@ -1156,6 +1181,10 @@ async def items_today(
     return TodayResponse(
         as_of=now,
         items=[TodayItem(**row, overdue=row["due_at"] <= now) for row in rows],
+        # Never overdue by construction: every one of these is due after the
+        # end of today.
+        later=[TodayItem(**row, overdue=False) for row in later],
+        later_truncated=truncated,
     )
 
 

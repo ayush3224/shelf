@@ -88,6 +88,9 @@ class StubDb(Database):
     async def today_items(self, user_id: str, before, limit: int = 200):
         return []
 
+    async def upcoming_items(self, user_id: str, at_or_after, limit: int = 200):
+        return [], False
+
     async def get_item(self, item_id: str, user_id: str):
         return self.row if self.row and item_id == self.row["id"] else None
 

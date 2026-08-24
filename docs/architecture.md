@@ -6,7 +6,7 @@
 ┌──────────────────────────────┐
 │  Expo / React Native (Android)│
 │  · Capture (home)             │
-│  · Today                      │
+│  · Today (+ Later)            │
 │  · Shelf                      │
 │  · Item detail                │
 │  · Review deck                │
@@ -216,6 +216,31 @@ UC33 (browse) and UC34 (search), both plain SQL with no model call.
 `v_items_query` still exists in migration 001. It is now unused; it costs
 nothing and would be needed again if this ever came back.
 
+## `Today` (UC32)
+
+```
+GET /items/today  →  { as_of, items, later, later_truncated }
+```
+
+Two lists from one request, split at the end of the user's day in their
+timezone rather than the server's (D15). The same instant is the exclusive
+upper bound of the first query and the inclusive lower bound of the second, so
+an active timed item is on exactly one of them and never on neither.
+
+- **`items`** — due and overdue, oldest first. This is the finishable list, and
+  the bound on it is design constraint 3. The screen's count, its empty state
+  and the phrase "Today is finished" all read this list and only this list.
+- **`later`** — active, due after today, soonest first. **No horizon** (D56): a
+  cap here would put far-dated items back on no screen, which is the bug this
+  block exists to close. There is a row limit, and `later_truncated` says when
+  it bit.
+
+They are separate lists rather than one list with a flag on each row, because
+the bound on `items` is the design and a single list is one careless edit away
+from losing it. Both are served by `items_due_idx`, the partial index on
+`(user_id, state, due_at) where state = 'active'` that has been there since
+migration 001 — no migration was needed for any of this.
+
 ## Retrieval (UC33, UC34, UC36)
 
 One endpoint, `GET /items`, behind one screen. Browse, search and filter are
@@ -230,7 +255,9 @@ GET /items?q=&state=&project=&from=&to=&cursor=&limit=
 Two defaults, and they deliberately differ:
 
 - **No parameters** → everything that is not `active`. The Shelf is defined by
-  what `Today` already owns.
+  what `Today` already owns — and since D56 `Today` owns *every* active timed
+  item, not only those due before midnight, so that definition finally covers
+  the whole space instead of leaving a gap between the two screens.
 - **A search** → *all four* states. You are looking for a thing you said, and
   whether it happens to be due today is not something you should have had to
   guess before typing. An explicit `state` beats both, which is what lets a

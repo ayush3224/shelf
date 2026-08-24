@@ -37,8 +37,14 @@ accurate, it is the wrong feature. Push back on it.
 1. **Capture must be ≤2 taps.** Anything that adds friction to capture
    loses more than it gains.
 2. **The app opens to the capture screen.** Never to a list.
-3. **`Today` must be finishable.** It shows due + overdue only. If it
-   becomes a wall, the design has failed.
+3. **`Today` must be finishable.** The list proper shows due + overdue only.
+   If it becomes a wall, the design has failed. Since 24 August 2026 the
+   screen also carries a separate **`Later`** block below it, holding active
+   items dated further out — they were previously on no screen at all (D56).
+   That block is a preview, not work: the count, the empty state and "Today is
+   finished" all key off the due list alone, and the bound on it is not
+   negotiable. Widening the *top* block is still how this constraint gets
+   broken.
 4. **Raw audio is never discarded** until the item is deleted. If
    transcription or parsing fails, keep the audio and flag the item —
    never lose the capture.

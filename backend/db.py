@@ -569,11 +569,12 @@ class Database:
     async def today_items(
         self, user_id: str, before: datetime, limit: int = 200
     ) -> list[dict[str, Any]]:
-        """Active items due at or before `before` — the `Today` list (UC32).
+        """Active items due at or before `before` — the finishable block (UC32).
 
-        Bounded on purpose. `Today` shows due and overdue only; anything
-        further out is not today's problem and putting it here is what turns
-        the screen into a wall the user can never finish.
+        Bounded on purpose, and the bound is the whole point: this is the list
+        that has to be finishable, and the way it stops being finishable is by
+        quietly widening. Anything due after `before` is `upcoming_items`'
+        problem — a separate query so that the two cannot merge by accident.
 
         Args:
             user_id: Owner of the items.
@@ -609,6 +610,62 @@ class Database:
             )
             columns = [c.name for c in result.description or []]
             return [dict(zip(columns, row)) for row in await result.fetchall()]
+
+    async def upcoming_items(
+        self, user_id: str, at_or_after: datetime, limit: int = 200
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Active items due after today — the `Later` block (UC32, D56).
+
+        The gap this closes: an active item due on a future day was on no
+        screen at all. `Today` stopped at the end of the day and the Shelf is
+        everything that is *not* active, so a capture for next Tuesday was
+        invisible between the moment it was made and the morning it fell due.
+
+        Deliberately **not** given a horizon. Capping this at a week or a
+        month would leave the same bug in a narrower form — something due in
+        three months would go back to being on no screen — and the reason
+        `Today` needs a bound does not apply here: this block is a preview,
+        not a list of work, so its length costs reading and not finishing.
+
+        Args:
+            user_id: Owner of the items.
+            at_or_after: Inclusive lower bound on `due_at`, the same instant
+                `today_items` stops at, so nothing can fall between the two.
+            limit: Rows to return.
+
+        Returns:
+            Rows soonest-due first, and whether the limit cut any off — asked
+            for by fetching one row past the limit, the same trick as
+            `browse_items`, because a cap nobody is told about reads as
+            "there is nothing else".
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                SELECT id::text,
+                       coalesce(nullif(parsed_text, ''), raw_text) AS text,
+                       raw_text,
+                       kind::text,
+                       state::text,
+                       due_at,
+                       critical,
+                       parse_status::text,
+                       audio_path IS NOT NULL AS has_audio
+                  FROM {settings.db_schema}.items
+                 WHERE user_id = %s
+                   AND state = 'active'
+                   AND due_at IS NOT NULL
+                   AND due_at >= %s
+                 ORDER BY due_at ASC
+                 LIMIT %s
+                """,
+                (user_id, at_or_after, limit + 1),
+            )
+            columns = [c.name for c in result.description or []]
+            rows = [dict(zip(columns, row)) for row in await result.fetchall()]
+
+        return rows[:limit], len(rows) > limit
 
     async def browse_items(
         self,

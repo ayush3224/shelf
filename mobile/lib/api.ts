@@ -315,10 +315,22 @@ export type TodayItem = {
 
 export type TodayResponse = {
   as_of: string;
+  /** Due and overdue — the finishable block. */
   items: TodayItem[];
+  /** Active, but due after today. Older servers omit it (D56). */
+  later?: TodayItem[];
+  /** Whether `later` was cut short by the server's page limit. */
+  later_truncated?: boolean;
 };
 
-/** Active items due or overdue (UC32). Bounded by the server, not filtered here. */
+/**
+ * What is due, and what is coming (UC32, D56).
+ *
+ * Both blocks in one request. The split is the server's — `items` is bounded
+ * to the end of the day and `later` holds the rest, and doing that division
+ * here instead would put the constraint that keeps `Today` finishable in the
+ * one place it cannot be enforced.
+ */
 export function today(): Promise<TodayResponse> {
   return request<TodayResponse>('/items/today');
 }

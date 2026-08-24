@@ -47,8 +47,11 @@ class StubDb(Database):
         previous_state: Optional[str] = "active",
     ) -> None:
         self.rows = rows if rows is not None else []
+        self.later_rows: list[dict[str, Any]] = []
+        self.later_truncated = False
         self.previous_state = previous_state
         self.today_calls: list[dict[str, Any]] = []
+        self.upcoming_calls: list[dict[str, Any]] = []
         self.done_calls: list[tuple[str, str]] = []
 
     async def today_items(
@@ -56,6 +59,14 @@ class StubDb(Database):
     ) -> list[dict[str, Any]]:
         self.today_calls.append({"user_id": user_id, "before": before, "limit": limit})
         return self.rows
+
+    async def upcoming_items(
+        self, user_id: str, at_or_after: datetime, limit: int = 200
+    ) -> tuple[list[dict[str, Any]], bool]:
+        self.upcoming_calls.append(
+            {"user_id": user_id, "at_or_after": at_or_after, "limit": limit}
+        )
+        return self.later_rows, self.later_truncated
 
     async def mark_done(self, item_id: str, user_id: str) -> Optional[str]:
         self.done_calls.append((item_id, user_id))
@@ -150,6 +161,65 @@ def test_parse_status_and_raw_text_survive_the_response(client):
 def test_empty_today_is_an_empty_list_not_an_error(client):
     body = client.get("/items/today", headers=auth()).json()
     assert body["items"] == []
+
+
+# ------------------------------------------------------- Later (UC32, D56)
+
+
+def test_the_two_blocks_meet_exactly_and_leave_no_gap(client):
+    """The bug this route had: an item due tomorrow was on neither list.
+
+    `today_items` stops *before* the end of the day and `upcoming_items` starts
+    *at or after* it. If those two instants are ever anything but identical,
+    active timed items fall between them and appear on no screen — which is
+    exactly what happened for eight days before anyone captured a future date.
+    """
+    client.get("/items/today", headers=auth())
+    assert (
+        client.stub.today_calls[0]["before"]
+        == client.stub.upcoming_calls[0]["at_or_after"]
+    )
+
+
+def test_upcoming_is_scoped_to_the_token_subject(client):
+    other = "00000000-0000-4000-8000-0000000000ff"
+    client.get("/items/today", headers={"Authorization": f"Bearer {mint(sub=other)}"})
+    assert client.stub.upcoming_calls[0]["user_id"] == other
+
+
+def test_future_items_come_back_under_later_and_are_never_overdue(client):
+    client.stub.later_rows = [row(due_at=datetime.now(IST) + timedelta(days=4))]
+    body = client.get("/items/today", headers=auth()).json()
+    assert body["items"] == []
+    assert len(body["later"]) == 1
+    assert body["later"][0]["overdue"] is False
+
+
+def test_the_finishable_block_is_not_widened_by_later(client):
+    """`items` stays due-and-overdue only. That bound is the design (D56)."""
+    client.stub.rows = [row(due_at=datetime.now(IST) - timedelta(hours=1))]
+    client.stub.later_rows = [
+        row(
+            id="b3f0c1a2-0000-4000-8000-000000000002",
+            due_at=datetime.now(IST) + timedelta(days=2),
+        )
+    ]
+    body = client.get("/items/today", headers=auth()).json()
+    assert len(body["items"]) == 1
+    assert len(body["later"]) == 1
+
+
+def test_a_truncated_later_list_says_so(client):
+    """A silently capped list reads as a complete one."""
+    client.stub.later_truncated = True
+    body = client.get("/items/today", headers=auth()).json()
+    assert body["later_truncated"] is True
+
+
+def test_later_is_absent_rather_than_null_when_there_is_nothing(client):
+    body = client.get("/items/today", headers=auth()).json()
+    assert body["later"] == []
+    assert body["later_truncated"] is False
 
 
 # ----------------------------------------------------------- mark done (UC16)
