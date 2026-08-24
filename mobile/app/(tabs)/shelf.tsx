@@ -23,6 +23,13 @@
  *
  * Paging is keyset, from the first request. This table only grows, and the
  * screen that browses all of it is the one place that has to assume so.
+ *
+ * It is also why this screen listens for item changes instead of reloading on
+ * focus (`lib/itemEvents`). Not refetching is what protects the scroll
+ * position, and it used to mean an item deleted, edited or moved on the detail
+ * screen stayed on the Shelf exactly as it was until a pull-to-refresh. The
+ * row is patched in place instead — and dropped when the change moves it out
+ * of the states currently being asked for.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -42,6 +49,7 @@ import { router, useFocusEffect } from 'expo-router';
 import { ApiError, browseItems, projects, reactivateItem } from '../../lib/api';
 import type { ItemState, ProjectSummary, ShelfItem } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
+import { applyItemChange, useItemChanges } from '../../lib/itemEvents';
 import { groupByProject, windowStart } from '../../lib/shelf';
 import { capturedOnLabel } from '../../lib/time';
 import { color, radius, space } from '../../lib/theme';
@@ -198,6 +206,20 @@ export default function Shelf() {
    */
   const generation = useRef(0);
 
+  /**
+   * The states the server actually applied to the last request.
+   *
+   * The Shelf's default is not a constant — it is "everything but active",
+   * except during a search, which spans all four so that a thing you said is
+   * findable whether or not it happens to be due. Rather than mirror that rule
+   * here and have the two drift, the response says which states it answered
+   * for and that echo is what decides whether a changed row still belongs.
+   *
+   * A ref, not state: it is read when a change arrives, never rendered, and
+   * putting it in state would resubscribe the listener on every page.
+   */
+  const shown = useRef<ItemState[]>(['shelved', 'done', 'dropped']);
+
   /** Debounce the search box so a typed word is one request, not five. */
   useEffect(() => {
     const trimmed = term.trim();
@@ -241,6 +263,7 @@ export default function Shelf() {
       try {
         const page = await browseItems(query);
         if (generation.current !== mine) return;
+        shown.current = page.states;
         setItems(page.items);
         setCursor(page.has_more ? page.next_cursor : null);
       } catch (e) {
@@ -300,6 +323,19 @@ export default function Shelf() {
     }, []),
   );
 
+  /**
+   * Somebody changed an item on the detail screen. Patch the row rather than
+   * reload: a reload here loses the scroll position, which is the whole reason
+   * this screen does not refetch on focus.
+   */
+  useItemChanges(
+    useCallback((change) => {
+      setItems((current) =>
+        applyItemChange(current, change, (row) => shown.current.includes(row.state)),
+      );
+    }, []),
+  );
+
   const toggleState = useCallback((value: ItemState) => {
     setStates((current) =>
       current.includes(value)
@@ -317,9 +353,10 @@ export default function Shelf() {
       try {
         const result = await reactivateItem(id);
         // It is no longer on the shelf, so it leaves the list — unless the
-        // filters were asking for active items too, in which case it belongs
-        // here and only its state word changes.
-        const shows = states.length ? states.includes('active') : Boolean(search);
+        // request was asking for active items too, in which case it belongs
+        // here and only its state word changes. The server's echo is what
+        // says which, for the same reason the change listener uses it.
+        const shows = shown.current.includes('active');
         setItems((current) =>
           shows
             ? current.map((i) => (i.id === id ? { ...i, state: 'active' } : i))
@@ -332,7 +369,7 @@ export default function Shelf() {
         setReactivating(null);
       }
     },
-    [reactivating, states, search, failed],
+    [reactivating, failed],
   );
 
   const sections = useMemo(() => groupByProject(items), [items]);

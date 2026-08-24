@@ -46,6 +46,7 @@ import {
 } from '../../lib/api';
 import type { ItemState, Person, PersonItem } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
+import { applyItemChange, useItemChanges } from '../../lib/itemEvents';
 import { PersonPicker } from '../../lib/PersonPicker';
 import { usePlayback } from '../../lib/playback';
 import { capturedOnLabel } from '../../lib/time';
@@ -215,6 +216,28 @@ export default function PersonScreen() {
     void load('initial');
   }, [load]);
 
+  /**
+   * Patch a row somebody changed on the detail screen, and drop one they
+   * deleted. No `keeps` predicate: every state belongs on a person page, so a
+   * note moving to `done` relabels the row rather than removing it.
+   *
+   * Reloading instead would be wrong for the same reason it is wrong on the
+   * Shelf — this list pages and is scrolled — and worse here, because the page
+   * also holds a selection (UC49) that a reload would silently discard.
+   */
+  useItemChanges(
+    useCallback((change) => {
+      setItems((current) => applyItemChange(current, change));
+      if (change.gone) {
+        setSelection((current) => {
+          if (current === null || !current.has(change.id)) return current;
+          const next = new Set(current);
+          next.delete(change.id);
+          return next;
+        });
+      }
+    }, []),
+  );
 
   const selecting = selection !== null;
 

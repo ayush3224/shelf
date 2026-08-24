@@ -45,6 +45,7 @@ import {
 } from '../../lib/api';
 import type { ItemDetail, ItemState } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
+import { publishItemChange } from '../../lib/itemEvents';
 import { usePlayback } from '../../lib/playback';
 import { capturedLabel, fullDueLabel } from '../../lib/time';
 import { color, radius, space } from '../../lib/theme';
@@ -127,6 +128,7 @@ export default function ItemScreen() {
         const updated = await editItem(id, changes);
         setDetail(updated);
         setText(updated.text);
+        publishItemChange({ id, item: updated });
         // Every state change is announced, including the ones an edit causes.
         setNotice(
           updated.state === before
@@ -161,6 +163,7 @@ export default function ItemScreen() {
       const updated = await fetchItem(id);
       setDetail(updated);
       setText(updated.text);
+      publishItemChange({ id, item: updated });
       setNotice(
         result.changed
           ? `Back on Today — due ${fullDueLabel(updated.due_at)}.`
@@ -182,11 +185,20 @@ export default function ItemScreen() {
     try {
       const result = await snoozeItem(id);
       if (!result.changed) {
-        setDetail({ ...detail, state: result.state });
+        // It moved under us — the lists are showing the old state too.
+        const moved = { ...detail, state: result.state };
+        setDetail(moved);
+        publishItemChange({ id, item: moved });
         setNotice(`That one has moved — it is ${result.state} now.`);
         return;
       }
-      setDetail({ ...detail, due_at: result.due_at, state: 'active' });
+      const snoozed: ItemDetail = {
+        ...detail,
+        due_at: result.due_at,
+        state: 'active',
+      };
+      setDetail(snoozed);
+      publishItemChange({ id, item: snoozed });
       setNotice(`Snoozed until ${fullDueLabel(result.due_at)}.`);
     } catch (e) {
       await failed(e, 'Could not snooze this item.');
@@ -207,7 +219,9 @@ export default function ItemScreen() {
       setNotice(null);
       try {
         const result = await setItemState(id, state);
-        setDetail({ ...detail, state: result.state });
+        const moved = { ...detail, state: result.state };
+        setDetail(moved);
+        publishItemChange({ id, item: moved });
         setNotice(`Moved to ${result.state}.`);
       } catch (e) {
         await failed(e, 'Could not move this item.');
@@ -236,8 +250,11 @@ export default function ItemScreen() {
               try {
                 playback.stop();
                 await deleteItem(id);
-                // Back to the list; the row is gone, so there is nothing to
-                // come back to.
+                // Back to the list, and tell it the row is gone. `Today`
+                // refetches on focus and would have found out anyway; the
+                // Shelf does not, by design, and used to keep showing a
+                // deleted item until it was pulled to refresh.
+                publishItemChange({ id, gone: true });
                 router.back();
               } catch (e) {
                 setBusy(false);
