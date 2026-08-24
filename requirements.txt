@@ -8,6 +8,9 @@ python-multipart==0.0.6
 httpx==0.25.2
 anthropic==1.0.0
 PyJWT==2.13.0
+# RS256 for the Google service account assertion (UC43, D52). PyJWT ships the
+# algorithm registry but not the backend; without this it can only do HMAC.
+cryptography==43.0.3
 ruff==0.1.8
 black==23.12.1
 pytest==9.1.1
