@@ -8,8 +8,8 @@ actually arrive:
 Every other suite stubs the database. This one does not, and that is the
 point: the tick is almost entirely SQL, and SQL that has only ever been read
 is SQL that has not been tested. The clock is real everywhere it can be —
-where a real wait would be absurd (an hour between pushes, ninety days on the
-shelf) the timestamps are backdated on real rows instead, which is the same
+where a real wait would be absurd (four hours between pushes, ninety days on
+the shelf) the timestamps are backdated on real rows instead, which is the same
 proof without the wait.
 
 The push service is stubbed, and stubbed *by default* — a test in this module
@@ -221,8 +221,9 @@ async def age_the_push(db: Database, item_id: str) -> None:
     """Backdate the outstanding push so the next one is due.
 
     This is the one thing a test cannot wait for honestly: the repeat interval
-    is an hour by default. The row is real and so is the update — only the
-    clock is being moved.
+    is four hours by default (D40). Read off the setting rather than hardcoded,
+    so tuning that constant does not quietly stop ageing the row past it. The
+    row is real and so is the update — only the clock is being moved.
     """
     async with db.connection() as conn:
         await conn.execute(
@@ -453,7 +454,7 @@ async def test_finishing_an_item_answers_its_push(db, delivers):
     """UC15 and UC16 land in the same place: the push has been answered.
 
     Without this write the scheduler would read the same silence as an ignore
-    an hour later, against an item that is already done.
+    a repeat interval later, against an item that is already done.
     """
     item_id = await make_item(
         db, due_at=datetime.now(timezone.utc) - timedelta(minutes=1)

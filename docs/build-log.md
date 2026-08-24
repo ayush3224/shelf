@@ -1115,6 +1115,8 @@ the number that actually decides how fast decay runs: at 60 with
 `SHELVE_AFTER_IGNORES` at 3, an item nobody touches is on the shelf about two
 hours after it fell due. `SHELVE_AFTER_IGNORES` was the constant everyone was
 watching, and it is the less interesting half of the pair (D33, O5).
+*Raised to 240 the next day — see 24 August. The claim that this is the number
+that matters is what survived; the number itself did not.*
 
 **The property worth naming.** *An item is never decayed by a push that did
 not go out.* `sent_at` is written only when Expo accepted the message, and the
@@ -1303,3 +1305,49 @@ works.
 verified through the API and under jest; it has not been under a thumb, and the
 thing it is most likely to be wrong about — whether it *feels* like an archive
 or like a backlog — is not a thing either of those can answer.
+
+### 24 August 2026 — four hours, not one
+
+`PUSH_REPEAT_MINUTES` went from 60 to 240. One line of config, and the reason
+is worth more than the diff.
+
+D33 set it to an hour the day before and defended the speed on principle: a
+decay threshold slow enough to be polite is one that never fires. That argument
+is still right. The number did not follow from it. **At 60, three ignores fit
+inside a single long meeting.** An item falls due at 9, is pushed while you are
+in a room you cannot answer from, pushed again at 10, again at 11, and is on
+the shelf at noon — before you have come out. The system reads that as a
+decision. It is not one.
+
+The distinction the interval exists to draw is between *one stretch of being
+unavailable* and *a pattern of avoidance*. UC18 is meant to detect the second.
+An interval shorter than a meeting cannot tell them apart at all, which is why
+this was answerable now rather than after a month of data: it is not that 60
+was wrong by some margin only usage could measure, it is that 60 could not
+perform the function the constant is for.
+
+At 240 the same three pushes span twelve hours — 9am, 1pm, 5pm for a thing due
+at 9, shelved at 9pm. Three separate chances in three different parts of a day.
+Declining all of them is recognisably avoidance.
+
+**The cost, stated plainly.** An item now sits `active` for up to twelve hours
+after you have in practice ignored it, and `Today` carries it that whole time.
+That is the trade and it is the right way round: `Today` holding something a
+few hours too long is recoverable, and a thing shelved out from under you
+during a meeting is the exact failure this design is trying not to have.
+
+D33 is marked superseded rather than rewritten, and D40 carries the new
+reasoning — the entry it replaces was correct about *which* constant matters,
+which is the part worth keeping. O5 was rewritten rather than amended, because
+the question changed shape: the plausible error now runs in both directions, so
+**nothing decaying at all** is as much a signal as items being reactivated by
+hand. The clock on collecting that evidence restarts today — transitions
+written before this change happened at a different pace and are not comparable
+with what comes after.
+
+Nothing in the code needed to change beyond the default. The scheduler reads
+the setting, and so does the db suite's backdating helper, which ages a push
+row `push_repeat_minutes + 1` past its send time rather than a hardcoded 61 —
+so tuning the constant does not quietly stop the test ageing the row past it.
+46 db tests and 270 unit tests pass unchanged at the new value; verified live
+that the running service reports 240 and paces an untouched 9am item to 9pm.

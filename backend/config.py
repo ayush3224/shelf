@@ -81,7 +81,9 @@ class Settings(BaseSettings):
     # How long an unanswered push waits before the next one comes due — and
     # with it, the write that reads the silence as `ignored` (D32). Three of
     # these is a shelving, so this constant sets how fast decay actually runs.
-    push_repeat_minutes: int = 60
+    # Four hours, not one: an hour made three ignores fit inside a single long
+    # meeting, which is an interruption rather than avoidance (D40).
+    push_repeat_minutes: int = 240
     # Default snooze (UC17). The client may ask for another value; anything
     # past the ceiling is refused rather than quietly clamped.
     snooze_minutes: int = 30

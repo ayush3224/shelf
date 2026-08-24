@@ -82,7 +82,9 @@ press Done. Until that has happened the exit criterion is not met.
 The **real gate** stated below — two weeks of daily use — was not met before
 this session, and the constants are still guesses because of it. `PUSH_REPEAT_MINUTES`
 is a new one (D33, O5) and it is the one that decides how fast decay actually
-runs.
+runs. It has since been raised from 60 to 240 (D40) — not because data arrived,
+but because an hour was refutable without it: three ignores fitted inside one
+meeting.
 
 ---
 
@@ -192,9 +194,12 @@ there is data:
 
 1. `SHELVE_AFTER_IGNORES` — default 3
 2. `DROP_AFTER_DAYS` — default 90
-3. `PUSH_REPEAT_MINUTES` — default 60, and the one that actually sets the
-   pace: at 60 with a threshold of 3, an item nobody touches is on the shelf
-   about two hours after it fell due (D33, O5)
+3. `PUSH_REPEAT_MINUTES` — **240** since 24 August 2026, and the one that
+   actually sets the pace: with a threshold of 3, an item nobody touches is
+   on the shelf about twelve hours after it fell due. It was 60, which put
+   that at two hours — inside a single long meeting, which is an interruption
+   and not the repeated avoidance UC18 is meant to catch (D40, superseding
+   D33; O5)
 
 The `transitions` table logs every state change with a reason, so after a
 month you can query how often a decay-shelved item gets resurrected by hand

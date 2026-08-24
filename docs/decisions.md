@@ -326,6 +326,7 @@ missed reminder.
 *Revisit if:* stalls happen for any reason other than a genuinely dead device.
 
 **D33 — `PUSH_REPEAT_MINUTES` is the real speed of decay, and it is 60.**
+*Superseded on 24 August 2026 by D40, which raises it to 240. The first half of this entry — that the constant exists at all and that it is what sets the pace — still stands; only the number moved.*
 `docs/data-model.md` said an `ignored` row is written "when the next push comes
 due with no response to the previous one" — which quietly assumes a repeat
 interval that no constant had ever named. It is now `PUSH_REPEAT_MINUTES`, one
@@ -343,6 +344,8 @@ left to time out — so `push_count` stays "declined by silence" and
 `snooze_count` stays "declined out loud", and the threshold reads the sum.
 *Revisit if:* things you care about are shelved before the day they were due
 is over. That means an hour is too short, not that the model is wrong (D2).
+*That is exactly what happened, on inspection rather than in the field — see
+D40.*
 
 **D34 — Both notification actions open the app.**
 `expo-notifications` documents the cost of the quiet version plainly: with
@@ -437,6 +440,34 @@ and is exactly where that duplication would happen.
 does not offer either. `has_more` comes from fetching one row past the limit
 rather than from a second counting query.
 
+**D40 — `PUSH_REPEAT_MINUTES` is 240, not 60.**
+Raised from one hour to four on 24 August 2026, which moves a shelving from
+about two hours after the due time to most of a working day.
+D33 set it to an hour and argued that fast was deliberate: a threshold slow
+enough to be polite never fires. The argument holds; the number did not follow
+from it. At 60, three ignores fit comfortably inside one long meeting — the
+item falls due, is pushed while you are in a room you cannot answer from,
+pushed again, pushed a third time, and is on the shelf before you come out. The
+system reads that as a decision, and it is not one: **a single unavailable
+stretch is an interruption, not a pattern of avoidance.** What UC18 is supposed
+to detect is the second thing, and telling them apart is exactly what the
+interval is for.
+At 240 the same three ignores span twelve hours. An item due at 9am is shelved
+at 9pm, having been offered at 9, 1 and 5 — three genuinely separate chances,
+across a whole day, each in a different part of it. Declining all three is
+recognisably avoidance rather than a busy afternoon.
+*What this does not change:* the direction, or D2. Silence is still signal and
+still acts on its own; this is a claim about how much silence is enough to be
+sure, not about whether silence counts.
+*Cost:* an item now sits `active` for up to twelve hours after you have in
+practice ignored it, and `Today` carries it for that whole time. That is the
+trade, and it is the right way round — `Today` showing something for an extra
+few hours is recoverable, and a thing shelved out from under you during a
+meeting is the failure the whole design is trying not to have.
+*Revisit if:* `transitions` shows decay-shelved items being reactivated by hand
+at any real rate (O5), which would mean four hours is still too short — or if
+nothing ever decays at all, which would mean it is now too long.
+
 ---
 
 ## Open
@@ -448,12 +479,31 @@ reactivated — a high rate means the number is too low.
 **O2 — `DROP_AFTER_DAYS`.** Default 90. Same method: how often do you
 resurrect something from the shelf after 60+ days?
 
-**O5 — `PUSH_REPEAT_MINUTES`.** Default 60 (D33). The constant nobody
-had named, and the one that actually sets how fast decay runs. Same method
-as O1 and O2: after a month, ask `transitions` how many decay-shelved items
-were reactivated by hand, and how soon after the due time they shelved. A
-high reactivation rate here is more likely to be this number than
-`SHELVE_AFTER_IGNORES`.
+**O5 — `PUSH_REPEAT_MINUTES`.** Now 240, raised from 60 on 24 August
+2026 (D40, superseding D33). The constant nobody had named, and the one that
+actually sets how fast decay runs.
+
+*Why it moved before any data arrived.* This is still an open question and the
+new number is still a guess — but the old one was answerable without data,
+because it was wrong on its own terms rather than wrong by some margin only
+usage could reveal. At 60, three ignores fit inside a single long meeting: an
+item could fall due, be pushed three times into a room you cannot answer from,
+and be shelved before you came out. UC18 exists to detect **repeated
+avoidance**, and one stretch of being unavailable is not that. The interval is
+precisely the mechanism that distinguishes them, so an interval shorter than a
+meeting cannot do its job no matter what the data eventually says. At 240 the
+three pushes span twelve hours — 9am, 1pm, 5pm for a thing due at 9 — and
+declining all three is recognisably a pattern.
+
+*What still needs data.* Whether four hours is itself right. Same method as O1
+and O2: after a month, ask `transitions` how many decay-shelved items were
+reactivated by hand, and how long after the due time they shelved. A high
+reactivation rate is still more likely to be this number than
+`SHELVE_AFTER_IGNORES` — but now the plausible error is in the other direction
+too, and **nothing decaying at all** is the signal that four hours is too long.
+The clock on collecting that evidence restarts here: the constant changed, so
+transitions written before 24 August 2026 were produced under a different
+pace and are not comparable.
 
 **O3 — Echo-back on capture.** Should the app confirm what it
 understood ("Got it — call insurance, Tuesday 3pm") or stay silent and

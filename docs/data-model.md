@@ -152,7 +152,7 @@ Keep these in one config module, not scattered as literals.
 ```python
 SHELVE_AFTER_IGNORES = 3     # UC18 — tune from `transitions` (O1)
 DROP_AFTER_DAYS      = 90    # UC19 — tune from `transitions` (O2)
-PUSH_REPEAT_MINUTES  = 60    # UC23 — and therefore the real speed of decay (D33, O5)
+PUSH_REPEAT_MINUTES  = 240   # UC23 — and therefore the real speed of decay (D33, D40, O5)
 SNOOZE_MINUTES       = 30    # UC17 — the default the notification button uses
 MAX_SNOOZE_MINUTES   = 10080 # a week; beyond this is refused, not clamped
 PUSH_BATCH_LIMIT     = 20    # sends per tick
