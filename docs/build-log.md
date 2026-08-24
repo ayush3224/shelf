@@ -183,13 +183,15 @@ off-site copy is still worth adding.
 | Audio stored + signed playback (UC7) | ✅ verified live, byte-identical |
 | Cloud transcription (UC8) | ✅ verified live — Groq turbo, 1.6s round trip |
 | Multi-item splitting (UC4) | ⚠️ built, never run against real Haiku |
-| Mobile test suite (jest-expo) | ✅ 110 tests |
+| Mobile test suite (jest-expo) | ✅ 116 tests, incl. a real-tree render behind a 48dp inset |
 | Backend test suite | ✅ 270 tests, plus 46 opt-in `-m db` on their own schema |
 | Native dep tree vs SDK 57 matrix | ✅ reconciled, `expo-doctor` 21/21 |
 | Google OAuth redirect handling | ✅ callback swallowed, not routed |
 | Google OAuth config | ❌ not started |
 | APK on the phone | ❌ not started |
 | Shelf screen: browse, search, filter (UC33/34/36) | ✅ verified live through the API |
+| Tab bar visible on the device | ⚠️ fixed (D41); needs one look at a phone to confirm |
+| Route render failures surfaced, not swallowed | ✅ `ErrorBoundary` on root and tabs layouts |
 | Reactivate reachable from a list (UC20) | ✅ row button + item detail |
 | Sessions 4-5 | ❌ not started |
 
@@ -1351,3 +1353,70 @@ row `push_repeat_minutes + 1` past its send time rather than a hardcoded 61 —
 so tuning the constant does not quietly stop the test ageing the row past it.
 46 db tests and 270 unit tests pass unchanged at the new value; verified live
 that the running service reports 240 and paces an untouched 9am item to 9pm.
+
+### 24 August 2026 — the tab bar that was six pixels tall
+
+The Shelf tab did not appear on the phone. Nor, it turned out, did `Today` —
+there was no tab bar at all, just the capture screen. The obvious reading was
+that `(tabs)` was not mounting, so that is what got checked first, and all of
+it was wrong:
+
+- **Route resolution.** Fed expo-router's own `getRoutes()` the real file list.
+  `(tabs)` resolves as a layout with `index`, `today` and `shelf` under it.
+- **`Stack.Protected`.** Exists in 57, behaves correctly, and `(tabs)` is a
+  *named* group rather than an anonymous one — a distinction that turned out
+  not to matter, because nothing in the guard was wrong.
+- **Missing native dependency.** `@react-navigation/*` is absent from
+  `package.json`, which looks alarming until you notice expo-router 57 vendors
+  its own copy at `expo-router/build/react-navigation/`.
+- **Not shipped in the APK.** `git ls-files` shows all four `(tabs)` files
+  tracked and there is no `.easignore`; a local `expo export` produces a bundle
+  containing `tabBarActiveTintColor` and every string from the Shelf screen.
+
+So the code was right, it was in the bundle, and the routes resolved. The next
+step was to stop reading and mount it. `@testing-library/react-native` went in
+as a dev dependency, `standard-navigation` was added to `transformIgnorePatterns`
+(it ships untranspiled ESM and jest-expo does not cover it), and
+`renderRouter('./app')` rendered the real tree — which produced a tab bar, with
+Capture, Today and Shelf in it.
+
+**Which is the whole point.** In a test the safe-area insets are zero. On a
+phone they are not, and the bar was setting its own height:
+
+```js
+// React Navigation's getTabBarHeight
+if (typeof customHeight === 'number') return customHeight;  // our 60 — inset NOT added
+return TABBAR_HEIGHT_UIKIT + inset;                          // the branch we skipped
+```
+
+The container still gets `paddingBottom: insets.bottom` either way, and our
+`tabBarStyle` — merged last — never overrode it. So on a device with gesture
+navigation: `60 - 6 - 48 = 6dp` of content box for a 13px label. A strip of
+`#FFFFFF`, six pixels tall, on a `#FBFAF8` page. The tab bar was not missing.
+It was there the entire time, invisible, since the app's first commit — and
+every tab in the app was unreachable behind it.
+
+Fixed by adding the inset to a constant instead of hoping it fits inside a
+literal (D41). `__tests__/tab-bar-insets.test.tsx` renders the real tree behind
+a 48dp inset and asserts the labels have room; against the old code it reports
+**6**, which is the number the phone had been showing all along.
+
+**The lesson is not "remember safe-area insets".** It is that this bug was
+immune to the entire test suite by construction: the broken input came from the
+environment, and the environment is precisely what a test replaces. Zero insets
+made the same code correct. Anything whose correctness depends on a value only
+the device supplies needs a test that supplies that value on purpose.
+
+**And an error boundary, which would not have caught this one.** Nothing threw
+— that is what made it expensive. But it belongs to a family that is worth
+defending against: the app degrading into something that still looks like a
+working screen, so you go hunting for a routing bug that is not there. Both
+layouts now export `ErrorBoundary` (expo-router picks it up by name and wraps
+the segment in `<Try>`), rendering the error, the stack and a retry rather than
+a shrug. Three tests cover it, including that the export is actually wired —
+a typo in that name is silent, and you would get the default screen and never
+know yours was ignored.
+
+**Still not confirmed on the phone.** The mechanism is proven and the fix
+removes the dependency on the inset value entirely, but the exact inset on that
+OnePlus was never measured from here — it needs a build and one look.

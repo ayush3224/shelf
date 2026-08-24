@@ -468,6 +468,43 @@ meeting is the failure the whole design is trying not to have.
 at any real rate (O5), which would mean four hours is still too short — or if
 nothing ever decays at all, which would mean it is now too long.
 
+**D41 — The tab bar's height is the inset plus a constant, never a literal.**
+`app/(tabs)/_layout.tsx` set `tabBarStyle.height` to `60`. It is now
+`BAR_CONTENT_HEIGHT + insets.bottom`, read from `useSafeAreaInsets()`.
+The literal made every tab in the app unreachable on the device, from the app's
+first commit until 24 August 2026, and nothing anywhere reported it.
+
+React Navigation's `getTabBarHeight` adds the bottom safe-area inset — but only
+on the branch where it computes the height itself:
+
+```js
+const customHeight = 'height' in flattenedStyle ? flattenedStyle.height : undefined;
+if (typeof customHeight === 'number') return customHeight;  // literal: inset NOT added
+return TABBAR_HEIGHT_UIKIT + inset;                          // default: inset added
+```
+
+It then applies `paddingBottom: insets.bottom` to the container regardless, and
+our `tabBarStyle` — merged last — did not override it. On a phone with gesture
+navigation that leaves `60 - 6 - 48 = 6dp` of content box for a 13px label:
+a strip of `#FFFFFF` a hairline tall against a `#FBFAF8` page. Not a missing
+tab bar — an invisible one. `Today` and `Shelf` were both unreachable, and the
+only reason it went unnoticed for two days is that everything tested until now
+was reachable from the capture screen or from a notification.
+
+*Why no test caught it.* In a test the insets are zero, so `60 - 6 - 0 = 54`
+and the same code is correct. This is the shape of bug that survives a green
+suite: **the environment supplies the broken input, and the environment is the
+one thing the test replaces.** `__tests__/tab-bar-insets.test.tsx` now renders
+the real tree behind a 48dp inset and asserts the label has room; it reports 6
+against the old code.
+
+*The rule.* A safe-area inset is not space a component may spend. Anything that
+sets its own height next to one adds the inset to a constant rather than
+subtracting it from a total — and if a component cannot say what its height is
+without knowing the inset, it should not be setting a height at all.
+*Revisit if:* never, in this direction. If the bar needs to be a different
+size, `BAR_CONTENT_HEIGHT` is the number to change.
+
 ---
 
 ## Open

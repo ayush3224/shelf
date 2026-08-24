@@ -66,6 +66,10 @@ export default function RootLayout() {
   );
 }
 
+// A render failure anywhere under the root lands here rather than leaving a
+// plausible-looking app with a piece missing (D41).
+export { RouteError as ErrorBoundary } from '../lib/RouteError';
+
 const styles = StyleSheet.create({
   splash: {
     flex: 1,

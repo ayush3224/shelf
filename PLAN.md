@@ -121,7 +121,11 @@ when a capture lands mid-scroll.*
 
 **Still outstanding:** the same last hop as session 2. None of this has been
 touched on a phone — the screen is verified through the API and under jest, not
-under a thumb.
+under a thumb. The first attempt to look at it on the device found the tab bar
+had been invisible since the app's first commit (D41): `tabBarStyle.height` was
+a literal, so the bottom safe-area inset ate the labels and `Today` and `Shelf`
+were both unreachable. Fixed, with a test that renders behind a real inset —
+but it still needs a build and one look.
 
 ---
 
