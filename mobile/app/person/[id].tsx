@@ -11,6 +11,13 @@
  * a different and much narrower question than "what do I know here". It is also
  * the question the rest of the app already answers.
  *
+ * **Every kind is here too**, since people are extracted from every capture
+ * rather than only from `person_note`s (24 August 2026). "Call Priya about the
+ * invoice" is a task and a fact about Priya; `kind` is one value and cannot be
+ * both, so making it choose lost one of them. `links` never asked, so the item
+ * is on the Shelf and on this page at the same time. The row names its kind
+ * when it is not the obvious one.
+ *
  * Playback is on the row (UC7), because half of what gets said about a person
  * is said rather than typed, and the transcript is a lossy copy of it.
  *
@@ -58,6 +65,21 @@ const STATE_WORD: Record<ItemState, string> = {
   shelved: 'Shelved',
   done: 'Done',
   dropped: 'Dropped',
+};
+
+/**
+ * How a kind reads on this page — and `person_note` reads as nothing.
+ *
+ * Every capture is scanned for who it names now, not only `person_note`s, so
+ * this page holds tasks and plain notes as well as things said *about*
+ * somebody. Naming the common case on every row would be noise; naming the
+ * others is the useful half, because "Call Priya about the invoice" being a
+ * task is most of what you want to know when you open Priya.
+ */
+const KIND_WORD: Record<PersonItem['kind'], string | null> = {
+  task: 'Task',
+  note: 'Note',
+  person_note: null,
 };
 
 type RowProps = {
@@ -110,6 +132,12 @@ function Row({
           <Text style={styles.metaText}>{capturedOnLabel(item.created_at)}</Text>
           <Text style={styles.metaDot}>·</Text>
           <Text style={styles.metaText}>{STATE_WORD[item.state]}</Text>
+          {KIND_WORD[item.kind] ? (
+            <>
+              <Text style={styles.metaDot}>·</Text>
+              <Text style={styles.metaText}>{KIND_WORD[item.kind]}</Text>
+            </>
+          ) : null}
           {item.parse_status !== 'ok' ? (
             <>
               <Text style={styles.metaDot}>·</Text>
@@ -159,6 +187,16 @@ export default function PersonScreen() {
   const [picking, setPicking] = useState<'merge' | 'move' | null>(null);
 
   const generation = useRef(0);
+
+  /** Drop an id from the selection, for a row that has left the page. */
+  const forget = useCallback((itemId: string) => {
+    setSelection((current) => {
+      if (current === null || !current.has(itemId)) return current;
+      const next = new Set(current);
+      next.delete(itemId);
+      return next;
+    });
+  }, []);
 
   const failed = useCallback(
     async (e: unknown, fallback: string) => {
@@ -226,17 +264,28 @@ export default function PersonScreen() {
    * also holds a selection (UC49) that a reload would silently discard.
    */
   useItemChanges(
-    useCallback((change) => {
-      setItems((current) => applyItemChange(current, change));
-      if (change.gone) {
-        setSelection((current) => {
-          if (current === null || !current.has(change.id)) return current;
-          const next = new Set(current);
-          next.delete(change.id);
-          return next;
-        });
-      }
-    }, []),
+    useCallback(
+      (change) => {
+        // A link added by hand puts a note on this page that was never on it.
+        // Nothing local can place it — the list is ordered by capture time and
+        // paged — so this is the one change that is worth a reload, the same
+        // answer merge and move already give.
+        if (change.type === 'linked') {
+          if (change.entityId === id) void load('refresh');
+          return;
+        }
+        if (change.type === 'unlinked') {
+          if (change.entityId === id) {
+            setItems((current) => current.filter((i) => i.id !== change.id));
+            forget(change.id);
+          }
+          return;
+        }
+        setItems((current) => applyItemChange(current, change));
+        if (change.type === 'deleted') forget(change.id);
+      },
+      [id, load, forget],
+    ),
   );
 
   const selecting = selection !== null;

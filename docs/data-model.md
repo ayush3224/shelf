@@ -90,6 +90,15 @@ Bidirectional edges between items and entities.
 Unique on `(item_id, entity_id, relation)` — which is what makes re-linking a
 capture idempotent rather than double-counting its mentions.
 
+**Written for every kind of item, not just `person_note`s** (24 August 2026,
+D46). A task that names somebody is linked to them, so it is on the Shelf and
+on their page at once; nothing in this table ever asked what `kind` the item
+was. Links can also be written and removed by hand from item detail
+(`POST`/`DELETE /items/{id}/people`), and that path resolves a typed name only
+by exact name or a recorded alias — never by the token subset `resolve_entity`
+uses, because a name somebody typed is not a guess to be improved on. Removing
+an entity's last link removes the entity, the same rule UC49 follows.
+
 **Name resolution** (`resolve_entity` in `backend/db.py`, D43) decides which
 row a parsed name belongs to: the same name, then a recorded alias, then a
 token subset in either direction — *only when exactly one entity matches*. Two
@@ -219,8 +228,9 @@ spoke. A split that fails degrades to the single item already parsed.
 
 Where each field lands on `items`: `kind`, `due_at` and `critical` map to
 their own columns, `text` to `parsed_text` (migration 002), and `due_at`
-decides `state` (UC12). `project_hint` and `entities` are returned to the
-caller but not yet stored — they need UC11 and UC44 respectively.
+decides `state` (UC12). `entities` are resolved and written to `entities` and
+`links` on **every** capture whatever its `kind` (UC45, D46). `project_hint` is
+still returned to the caller and not stored — UC11 was dropped.
 
 Relative expressions ("tomorrow at 3pm") are resolved against `TZ`, not
 against the server clock. The server runs in UTC; the user does not.

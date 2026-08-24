@@ -59,6 +59,7 @@ function detail(id: string, over: Partial<ItemDetail> = {}): ItemDetail {
     transcript_confidence: 0.9,
     created_at: '2026-08-24T09:00:00Z',
     updated_at: '2026-08-24T09:00:00Z',
+    people: [],
     ...over,
   };
 }
@@ -71,7 +72,7 @@ const onShelf = (r: ShelfItem) =>
 describe('a deleted item', () => {
   it('leaves the list', () => {
     const rows = [row('a'), row('b')];
-    const next = applyItemChange(rows, { id: 'a', gone: true });
+    const next = applyItemChange(rows, { type: 'deleted', id: 'a' });
     expect(next.map((r) => r.id)).toEqual(['b']);
   });
 
@@ -79,7 +80,7 @@ describe('a deleted item', () => {
     // Delete is unconditional: the row is gone from the database, so no
     // predicate gets a say in whether it stays on screen.
     const rows = [row('a', { state: 'active' })];
-    expect(applyItemChange(rows, { id: 'a', gone: true }, onShelf)).toEqual([]);
+    expect(applyItemChange(rows, { type: 'deleted', id: 'a' }, onShelf)).toEqual([]);
   });
 });
 
@@ -89,6 +90,7 @@ describe('an edited item', () => {
   it('shows its new words without a refetch', () => {
     const rows = [row('a', { text: 'Call teh bank' })];
     const next = applyItemChange(rows, {
+      type: 'updated',
       id: 'a',
       item: detail('a', { text: 'Call the bank' }),
     });
@@ -99,7 +101,7 @@ describe('an edited item', () => {
     // `ItemDetail` knows nothing about projects; a patch that spread it whole
     // would blank the section this row is grouped under.
     const rows = [row('a', { project_id: 'p1', project_name: 'Flat' })];
-    const next = applyItemChange(rows, { id: 'a', item: detail('a') });
+    const next = applyItemChange(rows, { type: 'updated', id: 'a', item: detail('a') });
     expect(next[0].project_name).toBe('Flat');
     expect(next[0].state_changed_at).toBe('2026-08-24T09:00:00Z');
   });
@@ -112,7 +114,7 @@ describe('a state change', () => {
     const rows = [row('a', { state: 'shelved' })];
     const next = applyItemChange(
       rows,
-      { id: 'a', item: detail('a', { state: 'done' }) },
+      { type: 'updated', id: 'a', item: detail('a', { state: 'done' }) },
       onShelf,
     );
     expect(next).toHaveLength(1);
@@ -125,7 +127,7 @@ describe('a state change', () => {
     const rows = [row('a'), row('b')];
     const next = applyItemChange(
       rows,
-      { id: 'a', item: detail('a', { state: 'active', due_at: '2026-08-25T09:00:00Z' }) },
+      { type: 'updated', id: 'a', item: detail('a', { state: 'active', due_at: '2026-08-25T09:00:00Z' }) },
       onShelf,
     );
     expect(next.map((r) => r.id)).toEqual(['b']);
@@ -136,6 +138,7 @@ describe('a state change', () => {
     // happens to an item takes it off somebody's page.
     const rows = [row('a')];
     const next = applyItemChange(rows, {
+      type: 'updated',
       id: 'a',
       item: detail('a', { state: 'dropped' }),
     });
@@ -148,8 +151,24 @@ describe('a state change', () => {
 describe('a change to an item this list has never shown', () => {
   it('hands the same array back', () => {
     const rows = [row('a')];
-    expect(applyItemChange(rows, { id: 'zzz', item: detail('zzz') })).toBe(rows);
-    expect(applyItemChange(rows, { id: 'zzz', gone: true })).toBe(rows);
+    expect(applyItemChange(rows, { type: 'updated', id: 'zzz', item: detail('zzz') })).toBe(rows);
+    expect(applyItemChange(rows, { type: 'deleted', id: 'zzz' })).toBe(rows);
+  });
+});
+
+// --------------------------------------------------------------- link changes
+
+describe('a link change', () => {
+  it('leaves the rows alone', () => {
+    // Who an item names does not change the item — it changes which lists it
+    // belongs to, and only a person page can answer that about itself.
+    const rows = [row('a')];
+    expect(applyItemChange(rows, { type: 'linked', id: 'a', entityId: 'e1' })).toBe(
+      rows,
+    );
+    expect(applyItemChange(rows, { type: 'unlinked', id: 'a', entityId: 'e1' })).toBe(
+      rows,
+    );
   });
 });
 
@@ -163,7 +182,7 @@ describe('the change feed', () => {
       useItemChanges((c) => seen[1].push(c));
     });
 
-    act(() => publishItemChange({ id: 'a', gone: true }));
+    act(() => publishItemChange({ type: 'deleted', id: 'a' }));
 
     expect(seen[0]).toHaveLength(1);
     expect(seen[1]).toHaveLength(1);
@@ -175,9 +194,9 @@ describe('the change feed', () => {
       useItemChanges((c) => seen.push(c)),
     );
 
-    act(() => publishItemChange({ id: 'a', gone: true }));
+    act(() => publishItemChange({ type: 'deleted', id: 'a' }));
     unmount();
-    act(() => publishItemChange({ id: 'b', gone: true }));
+    act(() => publishItemChange({ type: 'deleted', id: 'b' }));
 
     expect(seen.map((c) => c.id)).toEqual(['a']);
   });
@@ -193,7 +212,7 @@ describe('the change feed', () => {
       useItemChanges((c) => seen.push(c.id));
     });
 
-    act(() => publishItemChange({ id: 'a', gone: true }));
+    act(() => publishItemChange({ type: 'deleted', id: 'a' }));
     expect(seen).toEqual(['a']);
   });
 });

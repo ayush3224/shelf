@@ -79,6 +79,11 @@ class StubDb(Database):
         self.updates: list[dict[str, Any]] = []
         self.states: list[tuple[str, str, str]] = []
         self.deletes: list[tuple[str, str]] = []
+        self.people: list[dict[str, str]] = []
+        self.links: list[dict[str, Any]] = []
+        self.unlinks: list[tuple[str, str]] = []
+        self.link_result: Any = "auto"
+        self.unlink_result: Any = "auto"
 
     async def today_items(self, user_id: str, before, limit: int = 200):
         return []
@@ -117,6 +122,31 @@ class StubDb(Database):
     async def delete_item(self, item_id: str, user_id: str):
         self.deletes.append((item_id, user_id))
         return self.delete_result
+
+    async def item_people(self, item_id: str, user_id: str):
+        return list(self.people)
+
+    async def link_person(self, user_id, item_id, entity_id=None, name=None):
+        self.links.append({"item_id": item_id, "entity_id": entity_id, "name": name})
+        if self.link_result != "auto":
+            return self.link_result
+        entity = {
+            "id": entity_id or f"entity-{name}",
+            "name": name or "Somebody",
+            "type": "person",
+        }
+        self.people.append(entity)
+        return {**entity, "added": True}
+
+    async def unlink_person(self, user_id, item_id, entity_id):
+        self.unlinks.append((item_id, entity_id))
+        if self.unlink_result != "auto":
+            return self.unlink_result
+        before = len(self.people)
+        self.people = [p for p in self.people if p["id"] != entity_id]
+        if len(self.people) == before:
+            return None
+        return {"entity_id": entity_id, "person_removed": True}
 
 
 @pytest.fixture
@@ -322,3 +352,138 @@ def test_a_failed_object_delete_still_reports_the_delete(client, db, monkeypatch
 
 def test_delete_requires_a_token(client, db):
     assert client.delete(f"/items/{ITEM}").status_code == 401
+
+
+# ---------------------------------------------- people on an item, by hand (D45)
+#
+# Extraction runs on every capture now, not only on `person_note`s. That finds
+# far more and therefore misses far more, in both directions — so the detail
+# screen has to be able to say "yes she is" and "no he isn't", and neither
+# correction may touch the words. D45 already made this trade once for UC48 and
+# UC49: the machine files, the owner adjudicates.
+
+
+def test_the_detail_carries_who_the_item_is_linked_to(client, db):
+    db.people = [{"id": "e1", "name": "Priya Sharma", "type": "person"}]
+    body = client.get(f"/items/{ITEM}", headers=auth()).json()
+
+    assert body["people"] == [{"id": "e1", "name": "Priya Sharma", "type": "person"}]
+
+
+def test_an_item_with_nobody_on_it_says_so_rather_than_omitting_it(client, db):
+    assert client.get(f"/items/{ITEM}", headers=auth()).json()["people"] == []
+
+
+def test_a_task_carries_people_too(client, db):
+    """The whole point of the change: `kind` no longer decides whether a link
+    is allowed to exist."""
+    db.row = detail(kind="task")
+    db.people = [{"id": "e1", "name": "Priya", "type": "person"}]
+    body = client.get(f"/items/{ITEM}", headers=auth()).json()
+
+    assert body["kind"] == "task"
+    assert [p["name"] for p in body["people"]] == ["Priya"]
+
+
+def test_a_detail_still_opens_when_the_links_cannot_be_read(client, db, monkeypatch):
+    """The words are the item; the links are a view of it. A screen that will
+    not open because a join was slow is the worse failure (D6, UC42)."""
+
+    async def boom(*args: Any, **kwargs: Any):
+        raise RuntimeError("postgres is down")
+
+    monkeypatch.setattr(db, "item_people", boom)
+    response = client.get(f"/items/{ITEM}", headers=auth())
+
+    assert response.status_code == 200
+    assert response.json()["people"] == []
+
+
+def test_a_person_can_be_added_by_name(client, db):
+    response = client.post(
+        f"/items/{ITEM}/people", json={"name": "Priya Sharma"}, headers=auth()
+    )
+
+    assert response.status_code == 200
+    assert db.links == [{"item_id": ITEM, "entity_id": None, "name": "Priya Sharma"}]
+    assert [p["name"] for p in response.json()["people"]] == ["Priya Sharma"]
+
+
+def test_a_person_can_be_added_by_id(client, db):
+    response = client.post(
+        f"/items/{ITEM}/people",
+        json={"person_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
+        headers=auth(),
+    )
+
+    assert response.status_code == 200
+    assert db.links[0]["entity_id"] == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+
+def test_adding_needs_exactly_one_of_a_name_and_a_person(client, db):
+    """The same shape the split picker sends (UC49), because it is the same
+    gesture — and both-or-neither is a client bug, not a silent preference."""
+    assert (
+        client.post(f"/items/{ITEM}/people", json={}, headers=auth()).status_code == 400
+    )
+    both = client.post(
+        f"/items/{ITEM}/people",
+        json={"person_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "name": "Priya"},
+        headers=auth(),
+    )
+    assert both.status_code == 400
+    assert db.links == []
+
+
+def test_a_blank_name_is_refused_rather_than_creating_a_nameless_person(client, db):
+    response = client.post(
+        f"/items/{ITEM}/people", json={"name": "   "}, headers=auth()
+    )
+    assert response.status_code == 400
+    assert db.links == []
+
+
+def test_adding_somebody_to_an_item_that_is_not_yours_is_a_404(client, db):
+    db.link_result = None
+    response = client.post(
+        f"/items/{ITEM}/people", json={"name": "Priya"}, headers=auth()
+    )
+    assert response.status_code == 404
+
+
+def test_a_link_can_be_removed(client, db):
+    db.people = [
+        {
+            "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "name": "Pansy",
+            "type": "person",
+        }
+    ]
+    response = client.delete(
+        f"/items/{ITEM}/people/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        headers=auth(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["people"] == []
+    assert response.json()["person_removed"] is True
+
+
+def test_removing_a_link_that_is_not_there_is_a_404(client, db):
+    response = client.delete(
+        f"/items/{ITEM}/people/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        headers=auth(),
+    )
+    assert response.status_code == 404
+
+
+def test_both_ends_of_the_correction_need_a_token(client, db):
+    assert (
+        client.post(f"/items/{ITEM}/people", json={"name": "Priya"}).status_code == 401
+    )
+    assert (
+        client.delete(
+            f"/items/{ITEM}/people/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        ).status_code
+        == 401
+    )

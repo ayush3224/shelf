@@ -692,3 +692,40 @@ show transcription quality degrading, and `needs_review` now means bad audio
 rather than an unexpected language.
 *Reopen if:* captures start happening in another language, or in more than
 one.
+
+**D46 — People are extracted from every capture, not only from
+`person_note`s.** *24 August 2026, owner's decision.*
+"Call Priya about the invoice" is a task *and* a fact about Priya. `kind` is a
+single value and cannot be both, so leaving the link to depend on it meant one
+of the two was always lost — the item was either a task you would never find
+from Priya's page, or a note about Priya that never came due.
+
+`links` never required that choice. An item now appears on the Shelf and on a
+person's page at the same time, and a person's page shows every linked item
+regardless of kind, naming the kind on the row when it is not a `person_note`.
+The change is one line of the parse prompt and one line of the person row; the
+schema was already right (D7).
+
+*The cost is precision.* A wider net catches more and mis-catches more: a name
+said in passing, a "Pansy" who turns out to be a cat, and every miss the model
+was already making now spread over three times as many captures. That is
+answered the way D45 answered it for merge and split rather than by tuning the
+extraction — a link can be added or removed by hand on item detail, so a wrong
+one costs a tap. Correctable beats correct.
+
+*Manual linking is deliberately not `resolve_entity`.* That function resolves
+what a model heard and guesses by token subset when the evidence is thin (D43).
+A name a person typed is not a guess to improve on, so `link_person` matches
+only where matching is not a guess — the same name whatever its case and
+spacing, or a name already recorded as an alias. "priya sharma" is Priya
+Sharma; "Priya" is not, unless she is on file as answering to it. A duplicate
+that lands anyway is one merge away (UC48).
+
+*Removing the last link removes the person*, the rule a split already follows
+(UC49): a name with nothing behind it is clutter rather than data. Nothing said
+is deleted either way — this corrects the filing, not the capture, and losing
+the words is UC39 and a different button.
+
+*Revisit if:* person pages fill with noise faster than the correction gesture
+can clear it. That would mean the extraction needs a bar to clear, not that
+`kind` should be deciding again.

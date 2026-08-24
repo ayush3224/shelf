@@ -16,6 +16,13 @@
  * without saying so, so the way back has to be obvious rather than one chip
  * among four. **Snooze** (UC17) is here as well as on the notification,
  * because "not now" is an answer you also give while looking at the thing.
+ *
+ * **People** (UC45) is here for the same reason the rest of the screen is.
+ * Every capture is scanned for who it names now, not just `person_note`s, so
+ * a task can carry a person — and a wider net misses in both directions: a
+ * name said too quietly to hear, and a "Pansy" who turns out to be a cat. Both
+ * repairs are on the row that is wrong rather than on the person's page, which
+ * is where you are when you notice. Per D45, correctable beats correct.
  */
 import { useCallback, useEffect, useState } from 'react';
 import {
@@ -36,16 +43,19 @@ import DateTimePicker from '@react-native-community/datetimepicker';
 
 import {
   ApiError,
+  addItemPerson,
   deleteItem,
   editItem,
   item as fetchItem,
   reactivateItem,
+  removeItemPerson,
   setItemState,
   snoozeItem,
 } from '../../lib/api';
-import type { ItemDetail, ItemState } from '../../lib/api';
+import type { ItemDetail, ItemState, LinkedPerson } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { publishItemChange } from '../../lib/itemEvents';
+import { PersonPicker } from '../../lib/PersonPicker';
 import { usePlayback } from '../../lib/playback';
 import { capturedLabel, fullDueLabel } from '../../lib/time';
 import { color, radius, space } from '../../lib/theme';
@@ -81,6 +91,8 @@ export default function ItemScreen() {
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [picking, setPicking] = useState<'date' | 'time' | null>(null);
+  /** The person sheet is open (UC45). */
+  const [linking, setLinking] = useState(false);
 
   /** Shared failure handling: sign out on 401, otherwise say what happened. */
   const failed = useCallback(
@@ -128,7 +140,7 @@ export default function ItemScreen() {
         const updated = await editItem(id, changes);
         setDetail(updated);
         setText(updated.text);
-        publishItemChange({ id, item: updated });
+        publishItemChange({ type: 'updated', id, item: updated });
         // Every state change is announced, including the ones an edit causes.
         setNotice(
           updated.state === before
@@ -163,7 +175,7 @@ export default function ItemScreen() {
       const updated = await fetchItem(id);
       setDetail(updated);
       setText(updated.text);
-      publishItemChange({ id, item: updated });
+      publishItemChange({ type: 'updated', id, item: updated });
       setNotice(
         result.changed
           ? `Back on Today — due ${fullDueLabel(updated.due_at)}.`
@@ -188,7 +200,7 @@ export default function ItemScreen() {
         // It moved under us — the lists are showing the old state too.
         const moved = { ...detail, state: result.state };
         setDetail(moved);
-        publishItemChange({ id, item: moved });
+        publishItemChange({ type: 'updated', id, item: moved });
         setNotice(`That one has moved — it is ${result.state} now.`);
         return;
       }
@@ -198,7 +210,7 @@ export default function ItemScreen() {
         state: 'active',
       };
       setDetail(snoozed);
-      publishItemChange({ id, item: snoozed });
+      publishItemChange({ type: 'updated', id, item: snoozed });
       setNotice(`Snoozed until ${fullDueLabel(result.due_at)}.`);
     } catch (e) {
       await failed(e, 'Could not snooze this item.');
@@ -221,7 +233,7 @@ export default function ItemScreen() {
         const result = await setItemState(id, state);
         const moved = { ...detail, state: result.state };
         setDetail(moved);
-        publishItemChange({ id, item: moved });
+        publishItemChange({ type: 'updated', id, item: moved });
         setNotice(`Moved to ${result.state}.`);
       } catch (e) {
         await failed(e, 'Could not move this item.');
@@ -230,6 +242,63 @@ export default function ItemScreen() {
       }
     },
     [detail, busy, id, failed, reactivate],
+  );
+
+  /** Say who this is about, when the parse did not hear them (UC45). */
+  const addPerson = useCallback(
+    async (choice: { id: string } | { name: string }) => {
+      setLinking(false);
+      if (!detail || busy) return;
+      setBusy(true);
+      setError(null);
+      setNotice(null);
+      try {
+        const result = await addItemPerson(id, choice);
+        setDetail({ ...detail, people: result.people });
+        const added = result.people.find((p) =>
+          'id' in choice ? p.id === choice.id : p.name === choice.name.trim(),
+        );
+        // Their page is a list this item was not on a moment ago, and nothing
+        // local can place it there — the page is ordered by capture time and
+        // paged, so it reloads rather than guesses.
+        if (added) publishItemChange({ type: 'linked', id, entityId: added.id });
+        setNotice(
+          result.changed
+            ? `Filed under ${added?.name ?? 'them'} as well.`
+            : 'That one was already linked.',
+        );
+      } catch (e) {
+        await failed(e, 'Could not link that person.');
+      } finally {
+        setBusy(false);
+      }
+    },
+    [detail, busy, id, failed],
+  );
+
+  /** Take it off somebody's page. Nothing said is deleted (UC45, D45). */
+  const removePerson = useCallback(
+    async (who: LinkedPerson) => {
+      if (!detail || busy) return;
+      setBusy(true);
+      setError(null);
+      setNotice(null);
+      try {
+        const result = await removeItemPerson(id, who.id);
+        setDetail({ ...detail, people: result.people });
+        publishItemChange({ type: 'unlinked', id, entityId: who.id });
+        setNotice(
+          result.person_removed
+            ? `Off ${who.name}'s page — that was the last thing on it, so they are gone too.`
+            : `Off ${who.name}'s page. The words are untouched.`,
+        );
+      } catch (e) {
+        await failed(e, 'Could not remove that link.');
+      } finally {
+        setBusy(false);
+      }
+    },
+    [detail, busy, id, failed],
   );
 
   const confirmDelete = useCallback(() => {
@@ -254,7 +323,7 @@ export default function ItemScreen() {
                 // refetches on focus and would have found out anyway; the
                 // Shelf does not, by design, and used to keep showing a
                 // deleted item until it was pulled to refresh.
-                publishItemChange({ id, gone: true });
+                publishItemChange({ type: 'deleted', id });
                 router.back();
               } catch (e) {
                 setBusy(false);
@@ -470,6 +539,49 @@ export default function ItemScreen() {
             })}
           </View>
 
+          <Text style={styles.label}>People</Text>
+          <View style={styles.chipRow}>
+            {detail.people.map((who) => (
+              <View key={who.id} style={styles.personChip}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Open ${who.name}`}
+                  disabled={busy}
+                  onPress={() => router.push(`/person/${who.id}`)}
+                  hitSlop={6}
+                >
+                  <Text style={styles.personName}>{who.name}</Text>
+                </Pressable>
+                {/* Its own target, with room around it: a chip that both
+                    navigates and unlinks would do neither reliably. */}
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Not about ${who.name}`}
+                  disabled={busy}
+                  hitSlop={10}
+                  onPress={() => void removePerson(who)}
+                >
+                  <Text style={styles.personRemove}>×</Text>
+                </Pressable>
+              </View>
+            ))}
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Link someone to this item"
+              disabled={busy}
+              onPress={() => setLinking(true)}
+              style={[styles.chip, busy && styles.dimmed]}
+            >
+              <Text style={styles.chipText}>+ Someone</Text>
+            </Pressable>
+          </View>
+          {detail.people.length === 0 ? (
+            <Text style={styles.hint}>
+              Nobody heard in this one. Adding them here puts it on their page
+              too.
+            </Text>
+          ) : null}
+
           <Text style={styles.label}>What you said</Text>
           <Text style={styles.transcript}>{detail.raw_text || '—'}</Text>
           {note ? <Text style={styles.note}>{note}</Text> : null}
@@ -505,6 +617,15 @@ export default function ItemScreen() {
           ) : null}
         </View>
       </KeyboardAvoidingView>
+
+      <PersonPicker
+        visible={linking}
+        title="Who is this about?"
+        subtitle="It stays where it is and appears on their page as well."
+        allowCreate
+        onPick={(choice) => void addPerson(choice)}
+        onCancel={() => setLinking(false)}
+      />
     </SafeAreaView>
   );
 }
@@ -591,6 +712,23 @@ const styles = StyleSheet.create({
     paddingVertical: space.sm,
   },
   chipActive: { backgroundColor: color.accent, borderColor: color.accent },
+  // A person reads as a name, not as a state: bordered like the other chips so
+  // the row is one row, but the name carries the accent because it is a link
+  // somewhere rather than a setting.
+  personChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.sm,
+    backgroundColor: color.surface,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: color.border,
+    paddingLeft: space.md,
+    paddingRight: space.sm + 2,
+    paddingVertical: space.sm,
+  },
+  personName: { fontSize: 14, color: color.accent, fontWeight: '600' },
+  personRemove: { fontSize: 16, lineHeight: 18, color: color.faint },
   chipText: { fontSize: 14, color: color.text },
   chipTextActive: { color: color.accentText, fontWeight: '600' },
   transcript: {

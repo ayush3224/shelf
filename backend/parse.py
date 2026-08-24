@@ -1,4 +1,4 @@
-"""Haiku parse of a raw capture (UC9, UC10, UC12, UC14, UC4).
+"""Haiku parse of a raw capture (UC9, UC10, UC12, UC14, UC4, UC45).
 
 One small Anthropic call per capture. Classification plus extraction — see
 the parse contract in `docs/data-model.md`. Never Sonnet, never Opus, and
@@ -38,7 +38,8 @@ Reply with a single JSON object and nothing else — no markdown, no prose:
 "split":true|false}
 
 kind: task = something the speaker must do; person_note = about a specific
-person; note = anything else.
+person; note = anything else. A task that names somebody is still a task —
+naming a person does not make it a person_note.
 text: under 80 characters, imperative for a task, no filler words.
 due_at: only when the capture actually states a date or time. Resolve
 relative expressions against the current time given by the user. If no time
@@ -46,7 +47,9 @@ is stated, null — never invent one.
 critical: true only on explicit urgency cues ("urgent", "critical",
 "don't let me miss this"). A deadline alone is not critical.
 project_hint: a project or area name if one is named, else null.
-entities: people, orgs and places named in the capture. Empty list if none.
+entities: every person, org and place named, whatever the kind. "Call Priya
+about the invoice" is a task and it names Priya — both are true and both are
+wanted. Empty list only when nobody and nothing is named.
 split: true only when the capture holds two or more genuinely separate things
 that would each need their own reminder. One thing described at length, or a
 task with its context attached, is not a split. When true, still fill every
@@ -62,14 +65,16 @@ Reply with a single JSON object and nothing else — no markdown, no prose:
 
 Each element follows the same rules as a single parse:
 kind: task = something the speaker must do; person_note = about a specific
-person; note = anything else.
+person; note = anything else. A task that names somebody is still a task —
+naming a person does not make it a person_note.
 text: under 80 characters, imperative for a task, no filler words.
 due_at: only when that item actually states a date or time. Resolve relative
 expressions against the current time given by the user. If no time is stated
 for that item, null — never invent one, and never copy another item's time.
 critical: true only on explicit urgency cues, per item.
 project_hint: a project or area name if one is named, else null.
-entities: people, orgs and places named in that item. Empty list if none.
+entities: every person, org and place named in that item, whatever its kind.
+Empty list only when nobody and nothing is named.
 
 Split only what is genuinely separate. Prefer fewer, larger items over many
 fragments: two items is the common case. Never return an empty list — if the
@@ -118,7 +123,13 @@ def _coerce_due_at(value: Any) -> Optional[datetime]:
 
 
 def _coerce_entities(value: Any) -> list[dict[str, str]]:
-    """Keep only well-formed `{type, name}` entities. Linking is UC44, not now."""
+    """Keep only well-formed `{type, name}` entities.
+
+    Kept for every kind, not just `person_note`. "Call Priya about the invoice"
+    is a task and a fact about Priya, and `kind` is a single value that cannot
+    be both — so making it choose loses one of them. `links` never required
+    that choice: the item goes on the Shelf and on Priya's page at once.
+    """
     if not isinstance(value, list):
         return []
 

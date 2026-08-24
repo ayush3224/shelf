@@ -6,7 +6,14 @@
  * different things on this endpoint, and a client that collapses them turns
  * "fix the wording" into "and also shelve it".
  */
-import { deleteItem, editItem, item, setItemState } from '../lib/api';
+import {
+  addItemPerson,
+  deleteItem,
+  editItem,
+  item,
+  removeItemPerson,
+  setItemState,
+} from '../lib/api';
 import { supabase } from '../lib/supabase';
 
 const ID = 'b3f0c1a2-0000-4000-8000-000000000001';
@@ -131,5 +138,54 @@ describe('delete (UC39)', () => {
   it('surfaces a 404 rather than reporting success', async () => {
     stubApi({ detail: 'No such item' }, 404);
     await expect(deleteItem(ID)).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+
+// ------------------------------------------ linking people by hand (UC45, D45)
+//
+// The wire shape is the whole risk here: the server takes exactly one of
+// `person_id` and `name`, and a client that sent both — or sent `name: ''` for
+// a picked person — would get a 400 on the correction path, which is the path
+// that exists precisely because something already went wrong.
+
+describe('linking a person to an item', () => {
+  it('sends a picked person as an id', async () => {
+    const sent = stubApi({ id: ID, people: [], changed: true });
+    await addItemPerson(ID, { id: 'e1' });
+
+    expect(sent[0].url).toContain(`/items/${ID}/people`);
+    expect(sent[0].init.method).toBe('POST');
+    expect(parsed(sent[0])).toEqual({ person_id: 'e1' });
+  });
+
+  it('sends a typed name as a name, and nothing else', async () => {
+    const sent = stubApi({ id: ID, people: [], changed: true });
+    await addItemPerson(ID, { name: 'Priya Sharma' });
+
+    // Not `{ person_id: undefined, name: ... }`: the server reads
+    // both-or-neither as a client bug and refuses it.
+    expect(parsed(sent[0])).toEqual({ name: 'Priya Sharma' });
+  });
+
+  it('unlinks by id, on the item rather than on the person', async () => {
+    const sent = stubApi({ id: ID, people: [], person_removed: false });
+    await removeItemPerson(ID, 'e1');
+
+    expect(sent[0].url).toContain(`/items/${ID}/people/e1`);
+    expect(sent[0].init.method).toBe('DELETE');
+  });
+
+  it('returns who the item is linked to afterwards', async () => {
+    stubApi({
+      id: ID,
+      people: [{ id: 'e1', name: 'Priya Sharma', type: 'person' }],
+      changed: true,
+      person_removed: false,
+    });
+    const result = await addItemPerson(ID, { name: 'Priya Sharma' });
+
+    expect(result.people.map((p) => p.name)).toEqual(['Priya Sharma']);
+    expect(result.changed).toBe(true);
   });
 });

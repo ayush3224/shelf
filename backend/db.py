@@ -1166,6 +1166,206 @@ class Database:
 
         return linked
 
+    async def item_people(self, item_id: str, user_id: str) -> list[dict[str, Any]]:
+        """Who this item is linked to (UC45, UC46).
+
+        On the detail screen so that a link is visible where it can be
+        corrected. Before people were extracted from every capture this was a
+        fact you could only see from the other end — you found out a task had
+        been filed under the wrong Priya by opening Priya.
+
+        Args:
+            item_id: The item.
+            user_id: Owner. Scoped on the *item* as well as the entity, so a
+                guessed id cannot read somebody else's links.
+
+        Returns:
+            The linked entities, by name.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                f"""
+                SELECT e.id::text, e.name, e.type::text
+                  FROM {settings.db_schema}.links l
+                  JOIN {settings.db_schema}.entities e ON e.id = l.entity_id
+                  JOIN {settings.db_schema}.items i ON i.id = l.item_id
+                 WHERE l.item_id = %s AND i.user_id = %s AND e.user_id = %s
+                 ORDER BY e.name ASC
+                """,
+                (item_id, user_id, user_id),
+            )
+            columns = [c.name for c in result.description or []]
+            return [dict(zip(columns, row)) for row in await result.fetchall()]
+
+    async def link_person(
+        self,
+        user_id: str,
+        item_id: str,
+        entity_id: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Attach an item to a person by hand.
+
+        The other direction from `link_entities`, and deliberately not the same
+        function. That one resolves what a *model* heard and is willing to
+        guess when the evidence is thin — a token subset in either direction,
+        so "Priya" lands on "Priya Sharma" (D43). This one is a person pointing
+        at a name they typed, and guessing on top of that would be the app
+        overruling them.
+
+        So a typed name matches only where matching is not a guess: the same
+        name, ignoring case and spacing, or a name this person is already
+        recorded as going by. "priya sharma" is Priya Sharma; "Priya" is not,
+        unless she is on file as answering to it. Anything else is a new
+        person, and a duplicate that lands anyway is a merge away (UC48, D45).
+
+        Args:
+            user_id: Owner.
+            item_id: The item to attach.
+            entity_id: An existing person, from the picker.
+            name: A name typed on the spot. Ignored when `entity_id` is set.
+
+        Returns:
+            The entity now linked and whether the link was new, or None if the
+            item is not this user's, the person is not, or the name was blank.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            owned = await conn.execute(
+                f"SELECT 1 FROM {settings.db_schema}.items"
+                " WHERE id = %s AND user_id = %s",
+                (item_id, user_id),
+            )
+            if await owned.fetchone() is None:
+                return None
+
+            if entity_id:
+                found = await conn.execute(
+                    f"""
+                    SELECT id::text, name, type::text
+                      FROM {settings.db_schema}.entities
+                     WHERE id = %s AND user_id = %s
+                    """,
+                    (entity_id, user_id),
+                )
+                columns = [c.name for c in found.description or []]
+                row = await found.fetchone()
+                if row is None:
+                    return None
+                entity = dict(zip(columns, row))
+            else:
+                cleaned = " ".join((name or "").split())
+                if not cleaned:
+                    return None
+
+                known = await conn.execute(
+                    f"""
+                    SELECT id::text, name, type::text, aliases
+                      FROM {settings.db_schema}.entities
+                     WHERE user_id = %s AND type = 'person'
+                    """,
+                    (user_id,),
+                )
+                columns = [c.name for c in known.description or []]
+                wanted = _normalized(cleaned)
+                entity = None
+                for row in await known.fetchall():
+                    candidate = dict(zip(columns, row))
+                    names = [candidate["name"], *list(candidate["aliases"])]
+                    if any(_normalized(n) == wanted for n in names):
+                        entity = {k: candidate[k] for k in ("id", "name", "type")}
+                        break
+
+                if entity is None:
+                    # `ON CONFLICT` as well as the scan above: the scan settles
+                    # case and spacing, the constraint settles two taps racing
+                    # the picker's offer to create the same person twice.
+                    created = await conn.execute(
+                        f"""
+                        INSERT INTO {settings.db_schema}.entities
+                          (user_id, type, name, aliases)
+                        VALUES (%s, 'person', %s, '[]'::jsonb)
+                        ON CONFLICT (user_id, type, name)
+                          DO UPDATE SET name = EXCLUDED.name
+                        RETURNING id::text, name, type::text
+                        """,
+                        (user_id, cleaned),
+                    )
+                    columns = [c.name for c in created.description or []]
+                    entity = dict(zip(columns, await created.fetchone()))
+
+            linked = await conn.execute(
+                f"""
+                INSERT INTO {settings.db_schema}.links
+                  (item_id, entity_id, relation)
+                VALUES (%s, %s, 'mentions')
+                ON CONFLICT (item_id, entity_id, relation) DO NOTHING
+                """,
+                (item_id, entity["id"]),
+            )
+
+        return {**entity, "added": bool(linked.rowcount)}
+
+    async def unlink_person(
+        self, user_id: str, item_id: str, entity_id: str
+    ) -> Optional[dict[str, Any]]:
+        """Detach an item from a person by hand.
+
+        With people extracted from every capture rather than only from
+        `person_note`s, there is more to be wrong about in both directions —
+        a name heard in passing, a "Pansy" that is a cat. Removing a link is
+        the correction for the false positive, as the picker is for the miss.
+
+        The person is removed with their last link, the same rule a split
+        follows (UC49): a name with nothing behind it is clutter rather than
+        data. Nothing said about them is touched, because by then there is
+        nothing said about them.
+
+        Args:
+            user_id: Owner.
+            item_id: The item.
+            entity_id: Who to detach.
+
+        Returns:
+            What happened, or None if there was no such link to remove.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            removed = await conn.execute(
+                f"""
+                DELETE FROM {settings.db_schema}.links l
+                 WHERE l.item_id = %(item_id)s
+                   AND l.entity_id = %(entity_id)s
+                   AND EXISTS (
+                       SELECT 1 FROM {settings.db_schema}.items i
+                        WHERE i.id = l.item_id AND i.user_id = %(user_id)s)
+                   AND EXISTS (
+                       SELECT 1 FROM {settings.db_schema}.entities e
+                        WHERE e.id = l.entity_id AND e.user_id = %(user_id)s)
+                """,
+                {"item_id": item_id, "entity_id": entity_id, "user_id": user_id},
+            )
+            if not removed.rowcount:
+                return None
+
+            left = await conn.execute(
+                f"SELECT count(*) FROM {settings.db_schema}.links WHERE entity_id = %s",
+                (entity_id,),
+            )
+            person_removed = False
+            if (await left.fetchone())[0] == 0:
+                await conn.execute(
+                    f"""
+                    DELETE FROM {settings.db_schema}.entities
+                     WHERE id = %s AND user_id = %s
+                    """,
+                    (entity_id, user_id),
+                )
+                person_removed = True
+
+        return {"entity_id": entity_id, "person_removed": person_removed}
+
     async def merge_people(
         self, user_id: str, survivor_id: str, absorbed_id: str
     ) -> Optional[dict[str, Any]]:

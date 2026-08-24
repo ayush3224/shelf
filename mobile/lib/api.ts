@@ -416,6 +416,13 @@ export function reactivateItem(
 
 // ------------------------------------------------------------- item detail
 
+/** One person an item is linked to (UC45). */
+export type LinkedPerson = {
+  id: string;
+  name: string;
+  type: 'person' | 'org' | 'place';
+};
+
 export type ItemDetail = {
   id: string;
   /** What is displayed and edited. */
@@ -434,6 +441,14 @@ export type ItemDetail = {
   transcript_confidence: number | null;
   created_at: string;
   updated_at: string;
+  /**
+   * Who this item names (UC45).
+   *
+   * On every item, not just `person_note`s: "Call Priya about the invoice" is
+   * a task and a fact about Priya, and `kind` is one value that cannot be
+   * both. The item belongs on the Shelf and on her page at the same time.
+   */
+  people: LinkedPerson[];
 };
 
 /** One item in full (UC37). */
@@ -474,6 +489,54 @@ export function setItemState(itemId: string, state: ItemState): Promise<StateRes
   return request<StateResponse>(`/items/${itemId}/state`, {
     method: 'POST',
     body: JSON.stringify({ state }),
+  });
+}
+
+export type ItemPeopleResponse = {
+  id: string;
+  people: LinkedPerson[];
+  /** False when the link was already there — adding twice is not an error. */
+  changed: boolean;
+  /** True when that was somebody's last link and their row went with it. */
+  person_removed: boolean;
+};
+
+/**
+ * Link an item to a person by hand (UC45, D45).
+ *
+ * Exactly one of `id` and `name`, the same shape the split picker sends —
+ * because it is the same gesture. Extraction runs on every capture now, which
+ * finds far more people and therefore misses far more too; this is the repair
+ * for the miss, and `removeItemPerson` is the repair for the false positive.
+ *
+ * A typed name matches an existing person only where matching is not a guess:
+ * the same name whatever its case and spacing, or a name they are already
+ * recorded as going by. Anything else is somebody new, and a duplicate is one
+ * merge away (UC48).
+ */
+export function addItemPerson(
+  itemId: string,
+  who: { id: string } | { name: string },
+): Promise<ItemPeopleResponse> {
+  return request<ItemPeopleResponse>(`/items/${itemId}/people`, {
+    method: 'POST',
+    body: JSON.stringify('id' in who ? { person_id: who.id } : { name: who.name }),
+  });
+}
+
+/**
+ * Unlink an item from a person by hand (UC45, D45).
+ *
+ * Nothing said is deleted — this corrects the filing, not the capture. The
+ * person goes with their last link, the rule a split already follows (UC49):
+ * a name with nothing behind it is clutter rather than data.
+ */
+export function removeItemPerson(
+  itemId: string,
+  entityId: string,
+): Promise<ItemPeopleResponse> {
+  return request<ItemPeopleResponse>(`/items/${itemId}/people/${entityId}`, {
+    method: 'DELETE',
   });
 }
 

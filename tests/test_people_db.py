@@ -618,3 +618,202 @@ async def test_a_split_is_scoped_to_the_owner(db):
     assert await db.split_person(other, source, [item], into_name="Anil") is None
     rows, _ = await db.person_items(source, USER)
     assert [r["id"] for r in rows] == [item]
+
+
+# ------------------------------------------ linking and unlinking by hand (D45)
+#
+# With people extracted from every capture rather than only from `person_note`s
+# there is far more to be wrong about, in both directions: a name said in
+# passing that should not have stuck, and a name the model never heard. So both
+# corrections exist, and what is asserted here is that neither of them behaves
+# like the automatic path — `link_person` is a person pointing at a name they
+# typed, and guessing on top of that would be the app overruling them.
+
+
+async def test_a_person_can_be_linked_to_an_item_by_hand(db):
+    item = await make_item(db, "Call about the invoice")
+    linked = await db.link_person(USER, item, name="Priya Sharma")
+
+    assert linked is not None
+    assert linked["name"] == "Priya Sharma"
+    assert linked["added"] is True
+    assert [p["name"] for p in await db.item_people(item, USER)] == ["Priya Sharma"]
+
+
+async def test_a_typed_name_does_not_get_resolved_onto_somebody_else(db):
+    """The automatic rules would fold "Priya" into "Priya Sharma" by token
+    subset (D43). A name somebody typed is not a guess to be improved on — what
+    you type is who you get, and a duplicate is one merge away (UC48)."""
+    await db.link_entities(USER, await make_item(db), [person("Priya Sharma")])
+
+    item = await make_item(db, "Call about the invoice")
+    linked = await db.link_person(USER, item, name="Priya")
+
+    assert linked["name"] == "Priya"
+    assert await entity_count(db) == 2
+
+
+async def test_a_typed_name_matches_where_matching_is_not_a_guess(db):
+    """Case and spacing are not a different person, and a recorded alias is not
+    a guess either — it is already on file that she answers to it."""
+    await db.link_entities(USER, await make_item(db), [person("Priya")])
+    await db.link_entities(USER, await make_item(db), [person("Priya Sharma")])
+    priya = await entity_named(db, "Priya Sharma")
+    assert priya["aliases"] == ["Priya"]
+
+    by_alias = await db.link_person(USER, await make_item(db), name="priya")
+
+    assert by_alias["id"] == priya["id"]
+    assert await entity_count(db) == 1
+
+
+async def test_linking_a_name_that_already_exists_reuses_the_row(db):
+    """Two taps can race the picker's "create" offer; the unique constraint is
+    what actually decides."""
+    await db.link_entities(USER, await make_item(db), [person("Priya Sharma")])
+    existing = await entity_named(db, "Priya Sharma")
+
+    item = await make_item(db)
+    linked = await db.link_person(USER, item, name="  priya   sharma ")
+
+    assert linked["id"] == existing["id"]
+    assert await entity_count(db) == 1
+
+
+async def test_a_person_can_be_linked_by_id(db):
+    await db.link_entities(USER, await make_item(db), [person("Anil Kumar")])
+    anil = await entity_named(db, "Anil Kumar")
+
+    item = await make_item(db)
+    linked = await db.link_person(USER, item, entity_id=anil["id"])
+
+    assert linked["id"] == anil["id"]
+    assert [p["id"] for p in await db.item_people(item, USER)] == [anil["id"]]
+
+
+async def test_linking_the_same_person_twice_is_idempotent(db):
+    item = await make_item(db)
+    first = await db.link_person(USER, item, name="Priya")
+    second = await db.link_person(USER, item, name="Priya")
+
+    assert first["added"] is True
+    # Not an error and not a second mention: the unique constraint on
+    # `(item_id, entity_id, relation)` is what makes re-linking safe.
+    assert second["added"] is False
+    assert len(await db.item_people(item, USER)) == 1
+
+
+async def test_a_blank_name_links_nothing(db):
+    assert await db.link_person(USER, await make_item(db), name="   ") is None
+
+
+async def test_an_item_that_is_not_yours_cannot_be_linked(db):
+    stranger = "00000000-0000-4000-8000-0000000000ff"
+    item = await make_item(db)
+    assert await db.link_person(stranger, item, name="Priya") is None
+    assert await entity_count(db) == 0
+
+
+async def test_a_person_who_is_not_yours_cannot_be_linked(db):
+    await db.link_entities(USER, await make_item(db), [person("Priya")])
+    priya = await entity_named(db, "Priya")
+    stranger = "00000000-0000-4000-8000-0000000000ff"
+
+    assert (
+        await db.link_person(stranger, await make_item(db), entity_id=priya["id"])
+        is None
+    )
+
+
+async def test_a_link_can_be_removed_by_hand(db):
+    """The false positive: "Swati likes Pansy" naming a cat as a person."""
+    first = await make_item(db)
+    second = await make_item(db)
+    await db.link_entities(USER, first, [person("Pansy")])
+    await db.link_entities(USER, second, [person("Pansy")])
+    pansy = await entity_named(db, "Pansy")
+
+    removed = await db.unlink_person(USER, first, pansy["id"])
+
+    assert removed["person_removed"] is False
+    assert await db.item_people(first, USER) == []
+    # The other mention is untouched — this removed one link, not a person.
+    assert [p["name"] for p in await db.item_people(second, USER)] == ["Pansy"]
+
+
+async def test_removing_the_last_link_removes_the_person(db):
+    """The same rule a split follows (UC49): a name with nothing behind it is
+    clutter rather than data."""
+    item = await make_item(db)
+    await db.link_entities(USER, item, [person("Pansy")])
+    pansy = await entity_named(db, "Pansy")
+
+    removed = await db.unlink_person(USER, item, pansy["id"])
+
+    assert removed["person_removed"] is True
+    assert await entity_count(db) == 0
+
+
+async def test_removing_a_link_leaves_the_item_alone(db):
+    """Nothing said is deleted — this is a correction to the filing, not to the
+    capture. Losing the words would be UC39, and that is a different button."""
+    item = await make_item(db, "Swati likes Pansy")
+    await db.link_entities(USER, item, [person("Pansy")])
+    pansy = await entity_named(db, "Pansy")
+
+    await db.unlink_person(USER, item, pansy["id"])
+
+    async with db.connection() as conn:
+        result = await conn.execute(
+            f"SELECT raw_text FROM {settings.db_schema}.items WHERE id = %s", (item,)
+        )
+        assert (await result.fetchone())[0] == "Swati likes Pansy"
+
+
+async def test_removing_a_link_that_is_not_there_is_a_miss_not_a_crash(db):
+    await db.link_entities(USER, await make_item(db), [person("Priya")])
+    priya = await entity_named(db, "Priya")
+
+    assert await db.unlink_person(USER, await make_item(db), priya["id"]) is None
+
+
+async def test_a_link_that_is_not_yours_cannot_be_removed(db):
+    item = await make_item(db)
+    await db.link_entities(USER, item, [person("Priya")])
+    priya = await entity_named(db, "Priya")
+    stranger = "00000000-0000-4000-8000-0000000000ff"
+
+    assert await db.unlink_person(stranger, item, priya["id"]) is None
+    assert len(await db.item_people(item, USER)) == 1
+
+
+async def test_an_items_people_are_scoped_to_its_owner(db):
+    item = await make_item(db)
+    await db.link_entities(USER, item, [person("Priya")])
+    stranger = "00000000-0000-4000-8000-0000000000ff"
+
+    assert await db.item_people(item, stranger) == []
+
+
+async def test_a_task_and_a_person_note_both_land_on_the_person(db):
+    """The design change, at the level it actually lives: `links` never asked
+    what kind the item was, so a task and a note about the same person are the
+    same two rows on her page."""
+    task = await make_item(db, "Call Priya about the invoice")
+    note = await make_item(db, "Priya moved to Pune")
+    async with db.connection() as conn:
+        await conn.execute(
+            f"UPDATE {settings.db_schema}.items SET kind = 'task' WHERE id = %s",
+            (task,),
+        )
+        await conn.execute(
+            f"UPDATE {settings.db_schema}.items SET kind = 'person_note' WHERE id = %s",
+            (note,),
+        )
+    await db.link_entities(USER, task, [person("Priya")])
+    await db.link_entities(USER, note, [person("Priya")])
+    priya = await entity_named(db, "Priya")
+
+    rows, _ = await db.person_items(priya["id"], USER)
+
+    assert sorted(r["kind"] for r in rows) == ["person_note", "task"]

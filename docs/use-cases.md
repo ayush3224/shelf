@@ -94,8 +94,8 @@ than a backfill over every note ever captured (D7).
 
 | ID | Use case | Pri |
 |----|----------|-----|
-| UC45 | Voice-record a note about a person; the parse extracts who it is about and links the note to them | P1 |
-| UC46 | Person page — everything ever said about them, **newest first** (was "oldest to newest"; changed by the owner 24 August 2026 — the page is opened to see where things stand, and oldest-first buries that under the history) | P1 |
+| UC45 | Record a capture that names a person; the parse extracts who and links the item to them — **from every capture, not just `person_note`s** (widened by the owner 24 August 2026, D46), and a link can be added or removed by hand on item detail | P1 |
+| UC46 | Person page — every linked item **of any kind**, newest first (was "oldest to newest"; changed by the owner 24 August 2026 — the page is opened to see where things stand, and oldest-first buries that under the history) | P1 |
 | UC47 | Browse and search people | P1 |
 | UC48 | Merge two people — fold one into the other, their name becoming an alias | P1 |
 | UC49 | Split a person — move some of their notes to another person, existing or new | P1 |
@@ -116,6 +116,13 @@ Added 24 August 2026, after UC45-47 shipped. With correction two taps from the
 person page, a wrong resolution costs a gesture rather than being permanent, so
 `resolve_entity` is deliberately left willing to guess rather than tuned to
 refuse (D45). The owner judges identity; the machine only files.
+
+**UC45 covers every capture, not just `person_note`s** (24 August 2026, D46).
+"Call Priya about the invoice" is a task and a fact about Priya, and `kind` is
+one value that cannot be both — the links table never asked. The same trade
+follows: a wider net misses in both directions, so the link itself is
+correctable by hand on item detail, which is where you are standing when you
+notice it is wrong.
 
 ## Integrations
 

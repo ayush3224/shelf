@@ -32,10 +32,17 @@ import type { ItemDetail, ItemState } from './api';
  * server is what decided it — an edit that adds a time also moves the state
  * (UC12), and a client assembling that itself is a client that will eventually
  * assemble it wrong.
+ *
+ * Linking is its own pair of events rather than a flavour of `updated`: who an
+ * item names does not change the item, it changes which *lists* the item
+ * belongs to. Only a person page cares, and it is the one screen a link can
+ * add a row to or take one from.
  */
 export type ItemChange =
-  | { id: string; gone: true }
-  | { id: string; gone?: false; item: ItemDetail };
+  | { type: 'deleted'; id: string }
+  | { type: 'updated'; id: string; item: ItemDetail }
+  | { type: 'linked'; id: string; entityId: string }
+  | { type: 'unlinked'; id: string; entityId: string };
 
 /**
  * The fields every list holds for a row.
@@ -97,6 +104,10 @@ export function useItemChanges(onChange: Listener): void {
  * has to remove it, not relabel it. A list that shows every state passes
  * nothing and keeps everything.
  *
+ * Link changes pass straight through: whether an item belongs on somebody's
+ * page is a question about the list, not about the row, so the screen that
+ * cares answers it itself.
+ *
  * Returns the original array when no row matched, so a change to an item this
  * list has never heard of does not re-render it.
  */
@@ -105,11 +116,15 @@ export function applyItemChange<T extends ListedItem>(
   change: ItemChange,
   keeps: (row: T) => boolean = () => true,
 ): T[] {
-  if (change.gone) {
+  if (change.type === 'deleted') {
     return rows.some((row) => row.id === change.id)
       ? rows.filter((row) => row.id !== change.id)
       : rows;
   }
+
+  // A link change says nothing about the row itself; the screen that cares
+  // decides whether the item belongs to it at all, which is not a patch.
+  if (change.type !== 'updated') return rows;
 
   const { item } = change;
   if (!rows.some((row) => row.id === item.id)) return rows;

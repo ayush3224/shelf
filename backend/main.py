@@ -115,12 +115,24 @@ class AudioUrlResponse(BaseModel):
     expires_in: int
 
 
+class LinkedPerson(BaseModel):
+    """One person an item is linked to (UC45)."""
+
+    id: str
+    name: str
+    type: str
+
+
 class ItemDetail(BaseModel):
     """One item in full (UC37, UC38).
 
     Carries both texts: `text` is what is displayed and edited, `raw_text` is
     the transcript it was derived from. UC38 needs to show the second to make
     sense of a bad first (D14).
+
+    `people` is here because links are no longer a property of `person_note`s.
+    Every capture is scanned for who it names, so a task can carry a person and
+    the detail screen is where that becomes visible — and correctable (D45).
     """
 
     id: str
@@ -138,6 +150,27 @@ class ItemDetail(BaseModel):
     transcript_confidence: Optional[float] = None
     created_at: datetime
     updated_at: datetime
+    people: list[LinkedPerson] = Field(default_factory=list)
+
+
+class PersonLinkRequest(BaseModel):
+    """Body for POST /items/{item_id}/people.
+
+    Either an existing person or a name typed on the spot, never both — the
+    same shape the split picker sends (UC49), because it is the same gesture.
+    """
+
+    person_id: Optional[UUID] = None
+    name: Optional[str] = None
+
+
+class ItemPeopleResponse(BaseModel):
+    """Who an item is linked to, after a hand-made change."""
+
+    id: str
+    people: list[LinkedPerson] = Field(default_factory=list)
+    changed: bool = True
+    person_removed: bool = False
 
 
 class ItemUpdate(BaseModel):
@@ -1451,6 +1484,30 @@ async def list_projects(
 # `{item_id}` route placed first would swallow the literal and 422 on "today".
 
 
+async def _with_people(db: Database, user_id: str, row: dict[str, Any]) -> ItemDetail:
+    """Build an `ItemDetail` with the people the item is linked to.
+
+    A failure to read the links is not a failure to read the item: the words
+    are the item, the links are a view of it, and a detail screen that would
+    not open because a join was slow is worse than one that opens with an empty
+    chip row. Same rule as writing them (D6, UC42).
+
+    Args:
+        db: Database connection.
+        user_id: Owner.
+        row: The item as `get_item` returned it.
+
+    Returns:
+        The item, with `people` filled in where possible.
+    """
+    try:
+        people = await db.item_people(row["id"], user_id)
+    except Exception as e:
+        logger.warning("Could not load people for item %s: %s", row["id"], e)
+        people = []
+    return ItemDetail(**row, people=[LinkedPerson(**p) for p in people])
+
+
 @app.get("/items/{item_id}", response_model=ItemDetail)
 async def item_detail(
     item_id: UUID,
@@ -1478,7 +1535,7 @@ async def item_detail(
 
     if row is None:
         raise HTTPException(status_code=404, detail="No such item")
-    return ItemDetail(**row)
+    return await _with_people(db, user_id, row)
 
 
 @app.patch("/items/{item_id}", response_model=ItemDetail)
@@ -1531,7 +1588,105 @@ async def edit_item(
 
     if row is None:
         raise HTTPException(status_code=404, detail="No such item")
-    return ItemDetail(**row)
+    return await _with_people(db, user_id, row)
+
+
+@app.post("/items/{item_id}/people", response_model=ItemPeopleResponse)
+async def add_item_person(
+    item_id: UUID,
+    request: PersonLinkRequest,
+    db: Database = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+) -> ItemPeopleResponse:
+    """Attach an item to a person by hand (UC45, D45).
+
+    Extraction now runs on every capture rather than only on `person_note`s,
+    which finds far more and therefore misses far more too — a name said too
+    quietly, a nickname nobody has used in front of the model before. This is
+    the repair for the miss; `DELETE` below is the repair for the false
+    positive. Neither needs the automatic rules to get better, which is the
+    trade D45 already made once.
+
+    Args:
+        item_id: The item.
+        request: An existing person, or a name typed on the spot.
+        db: Database connection.
+        user_id: Authenticated user, from the Supabase token.
+
+    Returns:
+        Everyone the item is linked to afterwards.
+
+    Raises:
+        HTTPException: 400 if neither a person nor a usable name was sent,
+            404 if the item or the person is not this user's.
+    """
+    named = bool(request.name and request.name.strip())
+    if bool(request.person_id) == named:
+        raise HTTPException(
+            status_code=400, detail="Name a person to link, or pick one"
+        )
+
+    try:
+        linked = await db.link_person(
+            user_id=user_id,
+            item_id=str(item_id),
+            entity_id=str(request.person_id) if request.person_id else None,
+            name=request.name,
+        )
+    except Exception as e:
+        logger.error("Failed to link a person to item %s: %s", item_id, e)
+        raise HTTPException(status_code=500, detail="Failed to link that person")
+
+    if linked is None:
+        raise HTTPException(status_code=404, detail="No such item or person")
+
+    people = await db.item_people(str(item_id), user_id)
+    return ItemPeopleResponse(
+        id=str(item_id),
+        people=[LinkedPerson(**p) for p in people],
+        changed=bool(linked["added"]),
+    )
+
+
+@app.delete("/items/{item_id}/people/{entity_id}", response_model=ItemPeopleResponse)
+async def remove_item_person(
+    item_id: UUID,
+    entity_id: UUID,
+    db: Database = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+) -> ItemPeopleResponse:
+    """Detach an item from a person by hand (UC45, D45).
+
+    The person goes with their last link, the same rule a split follows
+    (UC49) — a name with nothing behind it is clutter rather than data.
+
+    Args:
+        item_id: The item.
+        entity_id: Who to detach.
+        db: Database connection.
+        user_id: Authenticated user, from the Supabase token.
+
+    Returns:
+        Everyone the item is linked to afterwards.
+
+    Raises:
+        HTTPException: 404 if there was no such link.
+    """
+    try:
+        removed = await db.unlink_person(user_id, str(item_id), str(entity_id))
+    except Exception as e:
+        logger.error("Failed to unlink %s from item %s: %s", entity_id, item_id, e)
+        raise HTTPException(status_code=500, detail="Failed to remove that link")
+
+    if removed is None:
+        raise HTTPException(status_code=404, detail="No such link")
+
+    people = await db.item_people(str(item_id), user_id)
+    return ItemPeopleResponse(
+        id=str(item_id),
+        people=[LinkedPerson(**p) for p in people],
+        person_removed=removed["person_removed"],
+    )
 
 
 @app.post("/items/{item_id}/state", response_model=StateResponse)
