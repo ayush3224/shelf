@@ -61,8 +61,8 @@ that history at something else.
 
 | ID | Use case | Pri |
 |----|----------|-----|
-| UC30 | Weekly review as a swipe deck — four directions, four states | P1 |
-| UC31 | Weekly digest of what decayed and what's about to drop | P1 |
+| UC30 | Weekly review as a swipe deck — four directions, four states. **Bounded to what carries a decision**: what decayed this week and what is about to drop (owner's decision, 24 August 2026, D50) | P1 |
+| UC31 | Weekly digest of what decayed and what's about to drop — **and what you completed and what was dropped**, as counts with expandable lists (widened by the owner 24 August 2026, D50). Those two are summary, not decisions, and never become cards | P1 |
 | UC32 | Daily `Today` list, bounded to due and overdue | P0 |
 
 ## Retrieval

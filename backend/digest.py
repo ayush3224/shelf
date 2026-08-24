@@ -94,9 +94,11 @@ class Digest:
     as_of: datetime
     shelved: list[dict[str, Any]] = field(default_factory=list)
     dropped: list[dict[str, Any]] = field(default_factory=list)
+    done: list[dict[str, Any]] = field(default_factory=list)
     expiring: list[dict[str, Any]] = field(default_factory=list)
     shelved_total: int = 0
     dropped_total: int = 0
+    done_total: int = 0
     expiring_total: int = 0
 
     @property
@@ -107,6 +109,11 @@ class Digest:
         reliably says "nothing happened" is how the one that matters gets
         swiped away unread, and the screen is still there for anyone who wants
         to check.
+
+        **Completions do not count.** They are on the screen because reading
+        what you finished is worth the space, but they are not a reason to
+        interrupt anybody: you already know you did them. What justifies a push
+        is the part of the week that happened without you.
         """
         return not (self.shelved_total or self.dropped_total or self.expiring_total)
 
@@ -144,23 +151,33 @@ async def build(db: Database, user_id: str, now: datetime) -> Digest:
     start, end = period_for(now)
     limit = settings.digest_list_limit
 
-    moved = await db.digest_decayed(user_id, start, end, limit=limit)
+    moved = await db.digest_moved(user_id, start, end, limit=limit)
     expiring = await db.digest_expiring(user_id, settings.digest_warn_days, limit=limit)
 
-    shelved = [row for row in moved if row["reason"] == "decay"]
-    dropped = [row for row in moved if row["reason"] == "expiry"]
+    buckets = {
+        name: [row for row in moved if row["bucket"] == name]
+        for name in ("shelved", "dropped", "done")
+    }
+
+    def total(rows: list[dict[str, Any]]) -> int:
+        """The bucket's size before truncation.
+
+        `total` is a window count carried on every row of its bucket, so any
+        row answers for all of them — and an empty bucket has no row to ask,
+        which is exactly when the answer is zero.
+        """
+        return int(rows[0]["total"]) if rows else 0
 
     return Digest(
         period_start=start,
         period_end=end,
         as_of=now,
-        shelved=shelved,
-        dropped=dropped,
+        shelved=buckets["shelved"],
+        dropped=buckets["dropped"],
+        done=buckets["done"],
         expiring=expiring,
-        # `total` is a window count carried on every row of its group, so any
-        # row of the group answers for all of them — and an empty group has no
-        # row to ask, which is exactly when the answer is zero.
-        shelved_total=int(shelved[0]["total"]) if shelved else 0,
-        dropped_total=int(dropped[0]["total"]) if dropped else 0,
-        expiring_total=int(expiring[0]["total"]) if expiring else 0,
+        shelved_total=total(buckets["shelved"]),
+        dropped_total=total(buckets["dropped"]),
+        done_total=total(buckets["done"]),
+        expiring_total=total(expiring),
     )

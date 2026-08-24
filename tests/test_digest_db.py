@@ -119,8 +119,8 @@ async def make_item(
 async def log_transition(
     db: Database, item_id: str, reason: str, at: datetime, to_state: str = "shelved"
 ) -> None:
-    """Put a decay or expiry into the audit log, at a chosen moment."""
-    from_state = "active" if to_state == "shelved" else "shelved"
+    """Put a transition into the audit log, at a chosen moment."""
+    from_state = "active" if to_state in ("shelved", "done") else "shelved"
     async with db.connection() as conn:
         await conn.execute(
             f"""
@@ -165,13 +165,13 @@ async def test_the_week_reports_what_the_system_put_away(db: Database):
     await log_transition(db, shelved, "decay", midweek)
     await log_transition(db, dropped, "expiry", midweek, to_state="dropped")
 
-    rows = await db.digest_decayed(USER, start, end)
+    rows = await db.digest_moved(USER, start, end)
 
-    by_reason = {row["reason"]: row for row in rows}
-    assert by_reason["decay"]["text"] == "Renew the passport"
-    assert by_reason["expiry"]["text"] == "That podcast idea"
-    assert by_reason["decay"]["total"] == 1
-    assert by_reason["expiry"]["total"] == 1
+    by_bucket = {row["bucket"]: row for row in rows}
+    assert by_bucket["shelved"]["text"] == "Renew the passport"
+    assert by_bucket["dropped"]["text"] == "That podcast idea"
+    assert by_bucket["shelved"]["total"] == 1
+    assert by_bucket["dropped"]["total"] == 1
 
 
 async def test_last_week_stays_in_last_week(db: Database):
@@ -184,17 +184,17 @@ async def test_last_week_stays_in_last_week(db: Database):
     item = await make_item(db, text="Book the dentist")
 
     await log_transition(db, item, "decay", start - timedelta(minutes=1))
-    assert await db.digest_decayed(USER, start, end) == []
+    assert await db.digest_moved(USER, start, end) == []
 
     await log_transition(db, item, "decay", start)
-    assert len(await db.digest_decayed(USER, start, end)) == 1
+    assert len(await db.digest_moved(USER, start, end)) == 1
 
 
 async def test_the_end_of_the_week_belongs_to_the_next_one(db: Database):
     start, end, _ = a_week_ago_now()
     item = await make_item(db, text="Book the dentist")
     await log_transition(db, item, "decay", end)
-    assert await db.digest_decayed(USER, start, end) == []
+    assert await db.digest_moved(USER, start, end) == []
 
 
 async def test_reactivating_something_does_not_erase_it_from_the_week(db: Database):
@@ -210,8 +210,8 @@ async def test_reactivating_something_does_not_erase_it_from_the_week(db: Databa
     await log_transition(db, item, "decay", midweek)
     await db.reactivate_item(item, USER)
 
-    (row,) = await db.digest_decayed(USER, start, end)
-    assert row["reason"] == "decay"
+    (row,) = await db.digest_moved(USER, start, end)
+    assert row["bucket"] == "shelved"
     assert row["state_now"] == "active"
 
 
@@ -221,12 +221,100 @@ async def test_a_truncated_section_still_knows_how_many_there_were(db: Database)
         item = await make_item(db, text=f"Thing {n}")
         await log_transition(db, item, "decay", midweek + timedelta(minutes=n))
 
-    rows = await db.digest_decayed(USER, start, end, limit=2)
+    rows = await db.digest_moved(USER, start, end, limit=2)
 
     assert len(rows) == 2
     assert all(row["total"] == 5 for row in rows)
     # Newest first, so a truncated list shows the most recent decisions.
     assert [row["text"] for row in rows] == ["Thing 4", "Thing 3"]
+
+
+async def test_what_you_finished_is_part_of_the_week(db: Database):
+    """Completions are summary, not an account of the system's decisions.
+
+    They are on the digest because reading what you got done is worth the
+    space — but they are terminal, there is nothing to swipe, so they never
+    reach the review deck (UC30).
+    """
+    start, end, midweek = a_week_ago_now()
+    item = await make_item(db, text="File the tax return", state="done")
+    await log_transition(db, item, "completion", midweek, to_state="done")
+
+    (row,) = await db.digest_moved(USER, start, end)
+
+    assert row["bucket"] == "done"
+    assert row["total"] == 1
+
+
+async def test_a_completion_counts_however_it_was_said(db: Database):
+    """The tap, the notification button and the state chips are one fact.
+
+    `mark_done` writes reason `completion` and the chips on item detail write
+    `manual` (UC21), and the difference is which control the finger landed on.
+    You finished it either way.
+    """
+    start, end, midweek = a_week_ago_now()
+    item = await make_item(db, text="Pay the electrician", state="done")
+    await log_transition(db, item, "manual", midweek, to_state="done")
+
+    (row,) = await db.digest_moved(USER, start, end)
+
+    assert row["bucket"] == "done"
+
+
+async def test_putting_something_away_yourself_is_not_news(db: Database):
+    """A shelving or a drop *you* performed is deliberately absent.
+
+    The digest exists because decay is silent (UC22 was dropped). A state you
+    set by hand was never silent — you pressed the button — and reporting it
+    back would pad the one screen that has to stay worth reading.
+    """
+    start, end, midweek = a_week_ago_now()
+    shelved = await make_item(db, text="Maybe later")
+    dropped = await make_item(db, text="Never mind", state="dropped")
+    await log_transition(db, shelved, "manual", midweek)
+    await log_transition(db, dropped, "manual", midweek, to_state="dropped")
+
+    assert await db.digest_moved(USER, start, end) == []
+
+
+async def test_a_row_carries_the_time_it_was_originally_due(db: Database):
+    """The deck ages a card against its due date, and only this query has it.
+
+    "Shelved 4 days ago" says how long it has been put away. "Due 9 days ago"
+    says how long you have been not doing it, and that is the half that
+    decides whether to keep it.
+    """
+    start, end, midweek = a_week_ago_now()
+    due = datetime.now(timezone.utc) - timedelta(days=9)
+    item = await make_item(db, text="Ring the landlord")
+    async with db.connection() as conn:
+        await conn.execute(
+            f"UPDATE {settings.db_schema}.items SET due_at = %s WHERE id = %s",
+            (due, item),
+        )
+    await log_transition(db, item, "decay", midweek)
+
+    (row,) = await db.digest_moved(USER, start, end)
+
+    assert row["due_at"] == due
+
+
+async def test_something_captured_without_a_time_has_no_due_date(db: Database):
+    """Most of the shelf, in fact: no time means shelved from the start (UC12).
+
+    The card has to read correctly with the due half simply missing, rather
+    than inventing a date to age against.
+    """
+    await make_item(
+        db,
+        text="That book somebody mentioned",
+        untouched_days=settings.drop_after_days - 3,
+    )
+
+    (row,) = await db.digest_expiring(USER, warn_days=14)
+
+    assert row["due_at"] is None
 
 
 async def test_another_user_s_week_is_not_in_this_one(db: Database):
@@ -235,7 +323,7 @@ async def test_another_user_s_week_is_not_in_this_one(db: Database):
     await log_transition(db, item, "decay", midweek)
 
     other = "00000000-0000-4000-8000-0000000000ff"
-    assert await db.digest_decayed(other, start, end) == []
+    assert await db.digest_moved(other, start, end) == []
 
 
 # ---------------------------------------------------- what is about to drop

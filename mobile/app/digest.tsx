@@ -7,24 +7,26 @@
  * screen does not exist, "the system reads your silence as an answer" is
  * indistinguishable from "the app loses things".
  *
- * Two sections in two different tenses, and the difference is the design:
+ * The screen is organised by **what you can do about it**, not by what
+ * happened, and the two do not line up:
  *
- * - **What moved** is history. It already happened, there is nothing to do
- *   about it here, and the rows are informational — you open one if you
- *   disagree with the decision. Reactivating from here would turn the week's
- *   account into a to-do list.
- * - **About to drop** is a forecast, and it is the half with something to act
- *   on: everything on it is still recoverable, and only until it is not. So
- *   this is the section that gets the one action on the screen.
+ * - **Still open** — about to drop, and shelved this week. Every row carries a
+ *   decision, and together they are exactly the review deck (UC30). This half
+ *   is offered as a deck first and a list second.
+ * - **Closed this week** — completed, and dropped. Terminal: there is nothing
+ *   to swipe, so these are never cards. They are collapsed behind their counts
+ *   and expand on a tap, because a count is the whole answer most weeks and
+ *   the list is what you want on the weeks it is not.
  *
- * The order is deliberate too. The forecast comes *first*, because it is the
- * part that is still actionable; putting the history above it would bury the
- * only thing you can do anything about under a list of things you cannot.
+ * Ordering follows the same rule. The forecast — the only part still
+ * recoverable, and only until it is not — sits above the history. Putting the
+ * account of decisions already made above the list you can still act on would
+ * bury the point of the screen under its own preamble.
  *
  * Not a tab. Four is the ceiling (D44), and this is a place you are sent to by
  * a notification once a week, not one you live in.
  */
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -38,9 +40,17 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useFocusEffect } from 'expo-router';
 
 import { ApiError, digest, reactivateItem } from '../lib/api';
-import type { DecayedItem, DigestResponse, ExpiringItem } from '../lib/api';
+import type { DigestResponse, ExpiringItem, MovedItem } from '../lib/api';
 import { useAuth } from '../lib/auth';
-import { capturedOnLabel, dropsInLabel, weekLabel } from '../lib/time';
+import { buildDeck } from '../lib/review';
+import {
+  capturedOnLabel,
+  dropsInLabel,
+  dueAgeLabel,
+  shelvedAgeLabel,
+  untouchedLabel,
+  weekLabel,
+} from '../lib/time';
 import { color, radius, space } from '../lib/theme';
 
 /** What a row says about where the item ended up, when that is not obvious. */
@@ -51,7 +61,7 @@ const MOVED_ON: Record<string, string> = {
 
 type SectionProps = {
   title: string;
-  subtitle: string;
+  subtitle?: string;
   shown: number;
   total: number;
   children: React.ReactNode;
@@ -61,7 +71,7 @@ function Section({ title, subtitle, shown, total, children }: SectionProps) {
   return (
     <View style={styles.section}>
       <Text style={styles.sectionTitle}>{title}</Text>
-      <Text style={styles.sectionSubtitle}>{subtitle}</Text>
+      {subtitle ? <Text style={styles.sectionSubtitle}>{subtitle}</Text> : null}
       {children}
       {total > shown ? (
         <Text style={styles.more}>
@@ -72,8 +82,72 @@ function Section({ title, subtitle, shown, total, children }: SectionProps) {
   );
 }
 
-function MovedRow({ item }: { item: DecayedItem }) {
+/**
+ * A closed-out section: a count you can open (UC31).
+ *
+ * Collapsed by default because on most weeks the number *is* the answer —
+ * "4 done, nothing dropped" is a complete report — and an expanded list of
+ * four things you already know you did would push the half of the screen that
+ * still needs a decision off the bottom.
+ */
+function Summary({
+  title,
+  total,
+  items,
+  empty,
+}: {
+  title: string;
+  total: number;
+  items: MovedItem[];
+  empty: string;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <View style={styles.summary}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded: open, disabled: total === 0 }}
+        accessibilityLabel={`${title}: ${total}`}
+        disabled={total === 0}
+        onPress={() => setOpen((v) => !v)}
+        style={({ pressed }) => [styles.summaryHead, pressed && styles.rowPressed]}
+      >
+        <Text style={styles.summaryCount}>{total}</Text>
+        <Text style={styles.summaryTitle}>{title}</Text>
+        {total > 0 ? <Text style={styles.chevron}>{open ? '−' : '+'}</Text> : null}
+      </Pressable>
+
+      {total === 0 ? <Text style={styles.summaryEmpty}>{empty}</Text> : null}
+
+      {open ? (
+        <View style={styles.summaryBody}>
+          {items.map((item) => (
+            <Pressable
+              key={`${item.id}-${item.at}`}
+              accessibilityRole="button"
+              accessibilityLabel={`Open: ${item.text}`}
+              onPress={() => router.push(`/item/${item.id}`)}
+              style={({ pressed }) => [styles.summaryRow, pressed && styles.rowPressed]}
+            >
+              <Text style={styles.summaryRowText} numberOfLines={2}>
+                {item.text}
+              </Text>
+              <Text style={styles.metaText}>{capturedOnLabel(item.at)}</Text>
+            </Pressable>
+          ))}
+          {total > items.length ? (
+            <Text style={styles.more}>and {total - items.length} more</Text>
+          ) : null}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function ShelvedRow({ item }: { item: MovedItem }) {
   const since = MOVED_ON[item.state_now];
+  const due = dueAgeLabel(item.due_at);
   return (
     <Pressable
       accessibilityRole="button"
@@ -85,7 +159,13 @@ function MovedRow({ item }: { item: DecayedItem }) {
         {item.text}
       </Text>
       <View style={styles.meta}>
-        <Text style={styles.metaText}>{capturedOnLabel(item.at)}</Text>
+        <Text style={styles.metaText}>{shelvedAgeLabel(item.at)}</Text>
+        {due ? (
+          <>
+            <Text style={styles.metaDot}>·</Text>
+            <Text style={styles.metaText}>{due.toLowerCase()}</Text>
+          </>
+        ) : null}
         {since ? (
           <>
             <Text style={styles.metaDot}>·</Text>
@@ -107,6 +187,7 @@ type ExpiringRowProps = {
 };
 
 function ExpiringRow({ item, onKeep, busy }: ExpiringRowProps) {
+  const due = dueAgeLabel(item.due_at);
   return (
     <View style={styles.row}>
       <Pressable
@@ -121,9 +202,13 @@ function ExpiringRow({ item, onKeep, busy }: ExpiringRowProps) {
         <View style={styles.meta}>
           <Text style={styles.metaText}>{dropsInLabel(item.drops_at)}</Text>
           <Text style={styles.metaDot}>·</Text>
-          <Text style={styles.metaText}>
-            untouched since {capturedOnLabel(item.untouched_since)}
-          </Text>
+          <Text style={styles.metaText}>{untouchedLabel(item.untouched_since)}</Text>
+          {due ? (
+            <>
+              <Text style={styles.metaDot}>·</Text>
+              <Text style={styles.metaText}>{due.toLowerCase()}</Text>
+            </>
+          ) : null}
         </View>
       </Pressable>
 
@@ -187,8 +272,8 @@ export default function Digest() {
   );
 
   // On focus rather than once: the "about to drop" half is a forecast off the
-  // current shelf, so coming back from an item you just edited has to show
-  // that the item is no longer on its way out.
+  // current shelf, so coming back from the deck — or from an item you just
+  // edited — has to show what is no longer on its way out.
   useFocusEffect(
     useCallback(() => {
       void load('initial');
@@ -228,6 +313,8 @@ export default function Digest() {
     [failed],
   );
 
+  const deck = useMemo(() => (week ? buildDeck(week) : []), [week]);
+
   if (loading && !week) {
     return (
       <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
@@ -238,8 +325,8 @@ export default function Digest() {
     );
   }
 
-  const nothing =
-    week && !week.shelved_total && !week.dropped_total && !week.expiring_total;
+  const nothingOpen = !deck.length;
+  const nothingClosed = week ? !week.done_total && !week.dropped_total : true;
 
   return (
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
@@ -270,10 +357,26 @@ export default function Digest() {
       >
         {error ? <Text style={styles.error}>{error}</Text> : null}
 
-        {nothing ? (
+        {nothingOpen && nothingClosed ? (
           <Text style={styles.empty}>
-            Nothing moved by itself, and nothing is near dropping.
+            Nothing moved by itself, nothing closed, and nothing is near dropping.
           </Text>
+        ) : null}
+
+        {/* The deck, offered before the lists it is made of. Everything below
+            is readable on its own; this is the two-minute version of it. */}
+        {deck.length ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Review ${deck.length} items`}
+            onPress={() => router.push('/review')}
+            style={({ pressed }) => [styles.review, pressed && styles.rowPressed]}
+          >
+            <Text style={styles.reviewText}>
+              Review {deck.length} {deck.length === 1 ? 'item' : 'items'}
+            </Text>
+            <Text style={styles.reviewHint}>One at a time, four ways out</Text>
+          </Pressable>
         ) : null}
 
         {week && week.expiring.length ? (
@@ -302,21 +405,25 @@ export default function Digest() {
             total={week.shelved_total}
           >
             {week.shelved.map((item) => (
-              <MovedRow key={`${item.id}-${item.at}`} item={item} />
+              <ShelvedRow key={`${item.id}-${item.at}`} item={item} />
             ))}
           </Section>
         ) : null}
 
-        {week && week.dropped.length ? (
-          <Section
-            title="Dropped"
-            subtitle="Long enough on the shelf, untouched. They are still here if you search."
-            shown={week.dropped.length}
-            total={week.dropped_total}
-          >
-            {week.dropped.map((item) => (
-              <MovedRow key={`${item.id}-${item.at}`} item={item} />
-            ))}
+        {week ? (
+          <Section title="Closed this week" shown={0} total={0}>
+            <Summary
+              title="finished"
+              total={week.done_total}
+              items={week.done}
+              empty="Nothing finished this week."
+            />
+            <Summary
+              title="dropped off the shelf"
+              total={week.dropped_total}
+              items={week.dropped}
+              empty="Nothing dropped this week."
+            />
           </Section>
         ) : null}
       </ScrollView>
@@ -339,6 +446,15 @@ const styles = StyleSheet.create({
   title: { color: color.text, fontSize: 28, fontWeight: '600' },
   week: { color: color.faint, fontSize: 14 },
   body: { paddingHorizontal: space.md, paddingBottom: space.xl, gap: space.lg },
+  review: {
+    backgroundColor: color.accent,
+    borderRadius: radius.md,
+    paddingHorizontal: space.md,
+    paddingVertical: space.md,
+    gap: 2,
+  },
+  reviewText: { color: color.accentText, fontSize: 17, fontWeight: '600' },
+  reviewHint: { color: color.accentText, fontSize: 13, opacity: 0.8 },
   section: { gap: space.sm },
   sectionTitle: { color: color.text, fontSize: 17, fontWeight: '600' },
   sectionSubtitle: { color: color.muted, fontSize: 13, lineHeight: 18 },
@@ -369,6 +485,21 @@ const styles = StyleSheet.create({
   metaText: { color: color.faint, fontSize: 13 },
   metaDot: { color: color.faint, fontSize: 13 },
   more: { color: color.faint, fontSize: 13, paddingTop: space.xs },
+  summary: { gap: space.xs },
+  summaryHead: { flexDirection: 'row', alignItems: 'baseline', gap: space.sm },
+  summaryCount: { color: color.text, fontSize: 22, fontWeight: '600', minWidth: 26 },
+  summaryTitle: { color: color.muted, fontSize: 15, flex: 1 },
+  chevron: { color: color.faint, fontSize: 18, paddingHorizontal: space.xs },
+  summaryEmpty: { color: color.faint, fontSize: 13, paddingLeft: 26 + space.sm },
+  summaryBody: { gap: space.xs, paddingLeft: 26 + space.sm },
+  summaryRow: {
+    gap: 2,
+    borderLeftWidth: 1,
+    borderLeftColor: color.border,
+    paddingLeft: space.sm,
+    paddingVertical: space.xs,
+  },
+  summaryRowText: { color: color.text, fontSize: 15, lineHeight: 20 },
   ghost: {
     paddingHorizontal: space.sm,
     paddingVertical: space.xs,

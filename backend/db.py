@@ -2078,29 +2078,42 @@ class Database:
     # now, and it moves the moment you touch anything. Joining them would
     # produce one list whose rows meant two different things.
 
-    async def digest_decayed(
+    async def digest_moved(
         self, user_id: str, start: datetime, end: datetime, limit: int = 20
     ) -> list[dict[str, Any]]:
-        """What the system put away by itself during a week (UC31).
+        """What left its old state during a week, and how (UC31).
 
         Reads `transitions`, not `items`, and that is the point: an item
         shelved by decay on Tuesday and reactivated by hand on Thursday still
         belongs in the week's digest, because the thing being reported is what
-        the system did, not where the item ended up. `state_now` carries the
-        second fact separately.
+        happened, not where the item ended up. `state_now` carries the second
+        fact separately.
 
-        `total` counts per reason before the limit, so a truncated section can
+        Three buckets, and they are not defined symmetrically because they are
+        not the same kind of news:
+
+        - `shelved` — `reason = 'decay'`. The system put it away on its own.
+        - `dropped` — `reason = 'expiry'`. Likewise, terminally.
+        - `done` — anything reaching `done`, however it was said: the tap, the
+          notification button, or the state chips on item detail. You finished
+          it either way, and this half of the digest is a summary rather than
+          an account of the system's own decisions.
+
+        A shelving or a drop the *user* performed is deliberately absent. That
+        is not something to be told about — you pressed the button.
+
+        `total` counts per bucket before the limit, so a truncated section can
         still say how much it is not showing.
 
         Args:
             user_id: Owner of the items.
             start: Inclusive start of the week.
             end: Exclusive end of the week.
-            limit: Rows per reason.
+            limit: Rows per bucket.
 
         Returns:
-            Newest first, each row carrying `reason` (`decay` or `expiry`) and
-            the `total` for that reason.
+            Newest first, each row carrying its `bucket` and that bucket's
+            `total`.
         """
         pool = await self._ensure_pool()
         async with pool.connection() as conn:
@@ -2108,24 +2121,38 @@ class Database:
                 f"""
                 WITH moved AS (
                     SELECT t.item_id,
-                           t.reason::text AS reason,
-                           t.created_at   AS at,
+                           CASE
+                             WHEN t.to_state = 'done' THEN 'done'
+                             WHEN t.reason = 'expiry' THEN 'dropped'
+                             ELSE 'shelved'
+                           END AS bucket,
+                           t.created_at AS at,
                            coalesce(nullif(i.parsed_text, ''), i.raw_text) AS text,
-                           i.kind::text   AS kind,
-                           i.state::text  AS state_now,
-                           count(*) OVER (PARTITION BY t.reason) AS total,
-                           row_number() OVER (
-                               PARTITION BY t.reason ORDER BY t.created_at DESC
-                           ) AS rank
+                           i.kind::text  AS kind,
+                           i.state::text AS state_now,
+                           i.due_at
                       FROM {settings.db_schema}.transitions t
                       JOIN {settings.db_schema}.items i ON i.id = t.item_id
                      WHERE i.user_id = %(user_id)s
-                       AND t.reason IN ('decay', 'expiry')
                        AND t.created_at >= %(start)s
                        AND t.created_at <  %(end)s
+                       AND (
+                             (t.reason = 'decay'  AND t.to_state = 'shelved')
+                          OR (t.reason = 'expiry' AND t.to_state = 'dropped')
+                          OR  t.to_state = 'done'
+                       )
+                ),
+                ranked AS (
+                    SELECT *,
+                           count(*)     OVER (PARTITION BY bucket) AS total,
+                           row_number() OVER (
+                               PARTITION BY bucket ORDER BY at DESC
+                           ) AS rank
+                      FROM moved
                 )
-                SELECT item_id::text AS id, text, kind, reason, at, state_now, total
-                  FROM moved
+                SELECT item_id::text AS id, text, kind, bucket, at, state_now,
+                       due_at, total
+                  FROM ranked
                  WHERE rank <= %(limit)s
                  ORDER BY at DESC
                 """,
@@ -2170,6 +2197,7 @@ class Database:
                     SELECT id,
                            coalesce(nullif(parsed_text, ''), raw_text) AS text,
                            kind::text AS kind,
+                           due_at,
                            greatest(state_changed_at, updated_at) AS untouched_since,
                            greatest(state_changed_at, updated_at)
                              + make_interval(days => %(drop_after)s) AS drops_at
@@ -2182,7 +2210,8 @@ class Database:
                       FROM shelved
                      WHERE drops_at < now() + make_interval(days => %(warn)s)
                 )
-                SELECT id::text, text, kind, untouched_since, drops_at, total
+                SELECT id::text, text, kind, due_at, untouched_since, drops_at,
+                       total
                   FROM soon
                  ORDER BY drops_at ASC
                  LIMIT %(limit)s

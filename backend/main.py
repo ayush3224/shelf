@@ -248,17 +248,23 @@ class DigestItem(BaseModel):
     kind: str
 
 
-class DecayedItem(DigestItem):
-    """Something the system put away by itself during the week.
+class MovedItem(DigestItem):
+    """Something that changed state during the week.
 
     `state_now` is separate from the transition on purpose: an item shelved on
     Tuesday and reactivated on Thursday is still part of what the system did
     that week, and hiding it would make the digest under-report exactly the
     cases the decay constants need tuning against (O1, O2).
+
+    `due_at` is here for the review deck (UC30), which ages a card against the
+    time it was originally due. "Shelved 4 days ago" says how long it has been
+    put away; "due 9 days ago" says how long you have been not doing it, and
+    only the second one is evidence about whether to keep it.
     """
 
     at: datetime
     state_now: str
+    due_at: Optional[datetime] = None
 
 
 class ExpiringItem(DigestItem):
@@ -268,6 +274,7 @@ class ExpiringItem(DigestItem):
     gone yet.
     """
 
+    due_at: Optional[datetime] = None
     untouched_since: datetime
     drops_at: datetime
 
@@ -275,23 +282,32 @@ class ExpiringItem(DigestItem):
 class DigestResponse(BaseModel):
     """Response for GET /digest — one week (UC31).
 
-    Two lists with different tenses. `shelved` and `dropped` are history and
-    will read the same in a year; `expiring` is a forecast off the current
-    state of the shelf and moves as soon as anything is touched. `as_of`
-    belongs to the forecast half, `period_start`/`period_end` to the other.
+    Four lists in two tenses, and a third distinction on top of that.
 
-    The `*_total` counts are before truncation, so a section that is showing
-    twenty of forty rows can say so.
+    `shelved`, `dropped` and `done` are **history** — they already happened and
+    will read the same in a year. `expiring` is a **forecast** off the current
+    state of the shelf, and it moves as soon as anything is touched; `as_of`
+    belongs to it, `period_start`/`period_end` to the other three.
+
+    Cutting across that: `shelved` and `expiring` are the two that carry a
+    decision, and they are what the review deck (UC30) is built from. `dropped`
+    and `done` are terminal — there is nothing to swipe — so they are summary,
+    and the screen shows them collapsed behind their counts.
+
+    The `*_total` counts are before truncation, so a section showing twenty of
+    forty rows can say so.
     """
 
     period_start: datetime
     period_end: datetime
     as_of: datetime
-    shelved: list[DecayedItem]
-    dropped: list[DecayedItem]
+    shelved: list[MovedItem]
+    dropped: list[MovedItem]
+    done: list[MovedItem]
     expiring: list[ExpiringItem]
     shelved_total: int
     dropped_total: int
+    done_total: int
     expiring_total: int
     warn_days: int
 
@@ -1179,11 +1195,13 @@ async def weekly_digest(
         period_start=week.period_start,
         period_end=week.period_end,
         as_of=week.as_of,
-        shelved=[DecayedItem(**row) for row in week.shelved],
-        dropped=[DecayedItem(**row) for row in week.dropped],
+        shelved=[MovedItem(**row) for row in week.shelved],
+        dropped=[MovedItem(**row) for row in week.dropped],
+        done=[MovedItem(**row) for row in week.done],
         expiring=[ExpiringItem(**row) for row in week.expiring],
         shelved_total=week.shelved_total,
         dropped_total=week.dropped_total,
+        done_total=week.done_total,
         expiring_total=week.expiring_total,
         warn_days=settings.digest_warn_days,
     )

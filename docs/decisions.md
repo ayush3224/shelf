@@ -827,3 +827,88 @@ digest can be turned down without turning off reminders.
 screen anything can still be done about; putting the week's account of what
 already happened above it would bury the one actionable list under a list of
 decisions already made.
+
+---
+
+**D50 — The review deck holds only what carries a decision. What is closed is
+summary, and lives on the digest.** *24 August 2026, owner's decision.*
+
+UC30 says "four directions, four states", which settles the gesture and says
+nothing about what gets dealt. Three readings were available and only one of
+them survives contact with the rest of the design.
+
+*Everything on the shelf* fails outright. After a month that is a hundred
+cards, and `CLAUDE.md` is explicit that a feature requiring admin work to keep
+state accurate is the wrong feature. It is the wall `Today` is bounded to avoid
+(D17), dealt one card at a time, and it cannot meet `PLAN.md`'s two-minute exit
+criterion at any deck size.
+
+*What the digest already surfaces* is the answer: **what decayed this week, and
+what is about to drop.** Bounded by construction — the same fourteen-day
+warning window and the same seven days — so the deck is short on a quiet week
+and never unbounded on a bad one. The digest reports; the deck answers.
+
+*What is closed this week — completed and dropped — is deliberately not in the
+deck.* Both are terminal. There is no swipe that means anything on a card you
+have already finished or that has already gone, and dealing them would pad the
+two minutes with cards whose only possible answer is "yes, I know". They go on
+the digest instead, **collapsed behind their counts and expandable**: on most
+weeks the number is the entire report, and the list is what you want on the
+weeks it is not.
+
+*The digest's buckets are therefore asymmetric, and each half is justified
+separately.* `shelved` is `reason = 'decay'` and `dropped` is
+`reason = 'expiry'` — the system's own decisions, which is what the screen
+exists to make visible. `done` is **anything reaching `done`, however it was
+said**: the tap, the notification button, or the state chips on item detail.
+You finished it either way. What is absent from all three is a shelving or a
+drop the *user* performed: that was never silent, you pressed the button, and
+reporting it back would pad the one screen that has to stay worth reading.
+
+*Completions never justify a push.* They are on the screen because reading what
+you got through is worth the space; they do not count towards `empty`, because
+what warrants interrupting somebody is the part of the week that happened
+without them.
+
+---
+
+**D51 — Left is a no-op, and a card is aged against its due date, not its
+shelving.** *24 August 2026.*
+
+Two details of the deck, both of which look like polish and are not.
+
+**The mapping.** Right is forward — bring it back to `active`. Up lifts it off
+— `done`. Down bins it — `dropped`. Left is sideways — leave it. A tie between
+the two axes goes to the horizontal, because left and right are the two
+answers you can take back.
+
+**Left writes nothing at all**, and that is the honest reading rather than an
+optimisation. Every card in this deck is already `shelved`, so "leave it" is a
+state the item is in. Recording the non-decision would touch the row, and
+touching a shelved row restarts its ninety-day drop clock (D37) — silently
+converting *"I looked at this and did nothing"* into *"keep it another three
+months"*, which is the opposite of what the gesture said. On the expiring half
+that difference is the whole decision: leaving something alone has to mean
+letting it drop on schedule.
+
+**Two ages on every card, because they say different things.** "Shelved 4 days
+ago" is how long the system has had it put away. "Due 9 days ago" is how long
+*you* have been not doing it. The shelving is always more recent than the
+neglect that caused it — an item captured in May and decayed on Tuesday reads
+as four days old and is four months overdue — so age-since-shelving alone
+flatters every card in the deck, and a swipe made on it is uninformed. Both are
+shown; `due_at` is carried on the digest rows for exactly this.
+
+An item that never had a time says so ("captured without a time — never had a
+deadline") rather than inventing an age. That is most of the shelf, by
+definition: no time means shelved from the start (UC12).
+
+*The buttons are not a fallback.* Four directions are also four labelled
+buttons, because a gesture-only screen is unusable with a screen reader and
+this is the one screen in the app whose actions are invisible until after you
+have taken one. The buttons are the legend.
+
+*Answers are optimistic.* The card leaves as the request goes out, because a
+deck that pauses on every card is not a two-minute review. Anything that fails
+to save is collected and **named** at the end — not counted, named, because "1
+did not save" is not something anybody can act on.

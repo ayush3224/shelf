@@ -183,8 +183,8 @@ off-site copy is still worth adding.
 | Audio stored + signed playback (UC7) | ✅ verified live, byte-identical |
 | Cloud transcription (UC8) | ✅ verified live — Groq turbo, 1.6s round trip |
 | Multi-item splitting (UC4) | ⚠️ built, never run against real Haiku |
-| Mobile test suite (jest-expo) | ✅ 166 tests, incl. real-tree renders behind a 48dp inset |
-| Backend test suite | ✅ 340 tests, plus 119 opt-in `-m db` on their own schema |
+| Mobile test suite (jest-expo) | ✅ 182 tests, incl. real-tree renders behind a 48dp inset |
+| Backend test suite | ✅ 341 tests, plus 124 opt-in `-m db` on their own schema |
 | Native dep tree vs SDK 57 matrix | ✅ reconciled, `expo-doctor` 21/21 |
 | Google OAuth redirect handling | ✅ callback swallowed, not routed |
 | Google OAuth config | ❌ not started |
@@ -195,10 +195,12 @@ off-site copy is still worth adding.
 | Reactivate reachable from a list (UC20) | ✅ row button + item detail |
 | People: extract, link, browse, search (UC45/46/47) | ✅ verified live through the API, no migration |
 | Correcting a person by hand (UC48/UC49) | ✅ merge and split, verified live |
-| Weekly digest — content and screen (UC31) | ✅ verified live through the API, both halves |
+| Weekly digest — content and screen (UC31) | ✅ verified live through the API, all four sections |
+| Weekly review deck (UC30) | ✅ built, bounded to what carries a decision (D50) |
+| A swipe threshold chosen with a thumb | ❌ 90px is a guess until the deck is used |
 | Weekly digest — the tick's own path (UC31) | ✅ built, claimed and sent once against live rows, push stubbed |
 | A digest notification actually on the phone | ❌ first real one due Sunday 09:00 IST |
-| Session 5 — UC30, UC43, UC14 delivery | ❌ not started |
+| Session 5 — UC43 calendar, UC14 delivery | ❌ not started |
 
 ## 7. Pending — immediate
 
@@ -1721,3 +1723,88 @@ before it — none of this has been touched on a phone.
 
 **Session 5 remains open:** UC30 (the weekly review deck), UC43 (Google
 Calendar), and UC14's delivery half.
+
+### 24 August 2026 (later) — the deck, and what does not belong in it
+
+UC30 is built, and the owner's two changes to it shaped both screens.
+
+**The deck is bounded to what carries a decision.** "Four directions, four
+states" settles the gesture and says nothing about what gets dealt, and the
+obvious reading — everything on the shelf — fails on its own terms. After a
+month that is a hundred cards; `CLAUDE.md` says a feature that makes you do
+admin to keep state accurate is the wrong feature, and it is the same wall
+`Today` is bounded to avoid, handed over one card at a time. So the deck is
+exactly the two halves of the digest that still carry a decision: what decayed
+this week, and what is about to drop. Bounded by construction, by the same
+seven days and the same fourteen-day warning window (D50).
+
+**What is closed belongs on the digest, not in the deck.** Completions and
+already-dropped items are terminal — there is no swipe that means anything on
+a card you have already finished — so dealing them would pad two minutes with
+cards whose only answer is "yes, I know". They are on the digest instead, as
+counts you can expand. That collapsed-by-default shape is the part I would not
+have chosen unprompted and now think is obviously right: most weeks "4
+finished, nothing dropped" *is* the whole report, and an expanded list of four
+things you know you did would push the half that still needs a decision off the
+bottom of the screen.
+
+**The buckets came out asymmetric, and each half needed its own argument.**
+`shelved` is `reason = 'decay'` and `dropped` is `reason = 'expiry'` — what the
+system did on its own, which is what the screen exists for. `done` is *any*
+transition into `done`, whether it came from the tap, the notification button,
+or the state chips on item detail: you finished it either way, and which
+control your finger landed on is not a distinction worth reporting. What is
+absent from all three is a shelving or a drop the **user** performed — that was
+never silent, you pressed the button, and reporting it back would pad the one
+screen that has to stay worth reading. Verified live, including the case that
+proves the rule: a manually dropped item does not appear, and a manually
+completed one does.
+
+Completions also do not count towards `empty`, so a week of nothing but
+finished work still sends no push. Reading what you got through is worth the
+space on a screen you opened; it is not worth interrupting anybody for.
+
+**Ageing was the other change, and it is the one that makes the swipe
+informed.** A card now says two things and they routinely disagree: "shelved 4
+days ago" is how long the system has had it put away, "due 9 days ago" is how
+long *you* have been not doing it. The shelving is always the more recent of
+the two — it is caused by the neglect — so age-since-shelving alone flatters
+every card in the deck. An item captured in May and decayed on Tuesday reads as
+four days old and is four months overdue, and those are not the same decision.
+`due_at` is now carried on the digest rows for exactly this. An item that never
+had a time says so rather than inventing an age, which is most of the shelf by
+definition (UC12).
+
+**Left writes nothing, and that took a moment to see.** Every card in the deck
+is already `shelved`, so "leave it" is the state the item is in — but the
+tempting implementation, recording the non-decision for symmetry, would touch
+the row, and touching a shelved row restarts its ninety-day drop clock (D37).
+That silently converts *"I looked at this and did nothing"* into *"keep it
+another three months"*, which is the opposite of what the gesture said. On the
+expiring half it is the entire decision: leaving something alone has to mean
+letting it drop on schedule. So `left` is a no-op with a test on it (D51).
+
+**Four buttons as well as four directions**, and not as a fallback. This is the
+first screen in the app whose primary control is a gesture, which makes it both
+unusable with a screen reader and invisible until after you have already
+committed to something. The buttons are the legend.
+
+**Answers are optimistic, and failures are named rather than counted.** A deck
+that pauses on each card is not a two-minute review, so the card leaves as the
+request goes out. Anything that does not save is collected and reported at the
+end **by its text** — "1 did not save" is not something anybody can act on, and
+the whole reason for holding them back was to let the run finish first.
+
+**What the tests could and could not reach.** The gesture is untestable, so
+everything the gesture *decides* was pulled into `lib/review.ts` as pure
+functions: what is in the deck, what each direction means, and how a drag
+resolves. That last one earned its test twice over — a diagonal has to pick one
+axis outright, because blending would make `done` and `keep` interchangeable at
+the corner, and a drag of 80 across and 79 down has travelled far enough to
+feel like a swipe and not far enough in any direction to be one.
+
+**Still a guess:** the 90px threshold, and whether two minutes is actually two
+minutes. Both are thumb questions, and this is the screen where the absence of
+a phone is felt hardest.
+
+**Session 5 remains open:** UC43 (Google Calendar) and UC14's delivery half.

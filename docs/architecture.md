@@ -144,10 +144,18 @@ GET /digest ◀── recomputed from transitions + items ◀── tap
 - **The content is never stored.** Two SQL queries, no model call. What decayed
   comes from `transitions`, what is about to drop from `items` as they stand.
   `shelf.digests` records only that a week was announced.
-- **Two tenses, and the screen is ordered by them.** "About to drop" is a
-  forecast, still actionable, and comes first; "shelved" and "dropped" are
-  history and sit under it. The one action on the screen is Keep, on the
-  forecast half, because that is the half anything can still be done about.
+- **Organised by what you can do about it**, not by what happened (D50). *Still
+  open* — about to drop, and shelved this week — carries a decision and is
+  exactly what the review deck is built from; it comes first, and the forecast
+  comes first within it. *Closed this week* — completed, and dropped — is
+  terminal, so it is collapsed behind its counts and expands on a tap. Most
+  weeks the number is the whole report.
+- **The buckets are asymmetric, on purpose** (D50). `shelved` is `decay` and
+  `dropped` is `expiry` — the system's own decisions. `done` is anything
+  reaching `done` however it was said, because you finished it either way. A
+  shelving or a drop the *user* performed appears nowhere: it was never silent.
+  Completions never count towards `empty` — reading them is worth the space,
+  interrupting somebody about them is not.
 - **Once a week, by constraint.** Unique on `(user_id, period_start)`; the tick
   runs every minute and the second attempt is refused by the database.
 - **An empty week is closed but not sent.** A weekly "nothing happened" teaches
@@ -160,6 +168,36 @@ GET /digest ◀── recomputed from transitions + items ◀── tap
 - **Its own Android channel**, at normal priority and with no Done/Snooze
   buttons. Sharing the reminder channel would let a weekly summary interrupt
   like a due item, which is how the channel that matters ends up muted.
+
+## The review deck (UC30)
+
+The doing half of Sunday. The digest is the account of the week; `/review` is
+the two minutes in which it gets answered.
+
+```
+                    ↑  done
+     shelved  ←   card   →  active          deck = digest.expiring
+                    ↓  dropped                   ++ digest.shelved
+```
+
+- **Bounded to what carries a decision** (D50): what decayed this week, and
+  what is about to drop. Never "everything shelved" — that is the wall `Today`
+  is bounded to avoid, dealt one card at a time, and it cannot meet the
+  two-minute exit criterion at any size.
+- **Expiring cards are dealt first.** A two-minute review is one that gets
+  abandoned halfway, so the cards that get looked at should be the ones with a
+  deadline on the decision.
+- **An item in both halves is dealt once**, as the expiring card — the version
+  of it with the deadline.
+- **Left writes nothing** (D51). Every card is already shelved, and recording
+  the non-decision would restart its drop clock (D37).
+- **Two ages per card** (D51): shelved-since and due-since. The second is the
+  one that decides the swipe, and the first consistently understates it.
+- **Four buttons as well as four directions.** Not a fallback — a gesture-only
+  screen is unusable with a screen reader, and the buttons are the legend for
+  a mapping that is otherwise invisible until you have already used it.
+- **Optimistic.** The card leaves as the request goes out; failures are
+  collected and named at the end rather than interrupting the run.
 
 ## Delivery tiers
 

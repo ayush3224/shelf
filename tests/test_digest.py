@@ -131,7 +131,7 @@ def test_a_digest_older_than_the_window_is_stale():
 # -------------------------------------------------------------- headline
 
 
-def _week(shelved=0, dropped=0, expiring=0) -> digest.Digest:
+def _week(shelved=0, dropped=0, expiring=0, done=0) -> digest.Digest:
     end = local(2026, 8, 23, 9)
     return digest.Digest(
         period_start=end - timedelta(days=7),
@@ -139,6 +139,7 @@ def _week(shelved=0, dropped=0, expiring=0) -> digest.Digest:
         as_of=end,
         shelved_total=shelved,
         dropped_total=dropped,
+        done_total=done,
         expiring_total=expiring,
     )
 
@@ -157,6 +158,17 @@ def test_the_headline_keeps_the_three_counts_in_order():
 def test_a_week_with_nothing_in_it_is_empty():
     assert _week().empty
     assert not _week(expiring=1).empty
+
+
+def test_a_week_of_nothing_but_completions_sends_nothing():
+    """You already know what you finished; nobody needs interrupting about it.
+
+    Completions are on the screen because reading them is worth the space, but
+    what justifies a push is the part of the week that happened without you.
+    """
+    week = _week(done=5)
+    assert week.empty
+    assert week.headline() == "Nothing moved"
 
 
 def test_something_about_to_drop_is_enough_to_be_worth_saying():

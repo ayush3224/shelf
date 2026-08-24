@@ -199,10 +199,19 @@ both are recomputed on every read of `GET /digest`, so the screen is correct
 before the first digest has ever been sent and cannot show a stale copy of an
 old one. This table records only which weeks were *announced*.
 
-The two halves are in different tenses and it matters: `shelved`/`dropped` are
-history and will read the same in a year, `expiring` is a forecast that moves
-the moment anything is touched. That is why the stored `expiring` count and the
-one on screen can differ — the notification is a snapshot, the screen is live.
+The halves are in different tenses and it matters: `shelved`/`dropped`/`done`
+are history and will read the same in a year, `expiring` is a forecast that
+moves the moment anything is touched. That is why the stored `expiring` count
+and the one on screen can differ — the notification is a snapshot, the screen
+is live.
+
+**What counts as news** (D50). `shelved` reads `reason = 'decay'` and `dropped`
+reads `reason = 'expiry'` — the transitions the system made on its own, which
+is the whole reason this screen exists. `done` reads any transition into
+`done`, however it was said. A shelving or a drop the *user* performed is in
+`transitions` and deliberately not in the digest: it was never silent. Only the
+first three counts feed `empty`; completions are worth reading and are not
+worth a push.
 
 ## Config constants
 
@@ -227,6 +236,7 @@ DIGEST_WARN_DAYS     = 14        # two digest cycles, so nothing drops with one 
 DIGEST_MAX_AGE_HOURS = 24        # past this a digest is abandoned, not sent late (D48)
 DIGEST_MAX_ATTEMPTS  = 5
 DIGEST_LIST_LIMIT    = 20        # rows per section; the count above it is the true total
+REVIEW_THRESHOLD     = 90        # UC30 — px a drag travels before it is an answer (D51)
 ```
 
 ## Parse contract

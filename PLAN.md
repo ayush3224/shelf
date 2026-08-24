@@ -173,8 +173,10 @@ the owner adjudicates.*
 ## Session 5 — Review and calendar (P1) — *in progress*
 
 - UC31 weekly digest of what decayed and what is about to drop ✅ *(built
+  24 August 2026; widened the same day to carry completions and drops as
+  expandable counts)*
+- UC30 weekly review as a swipe deck — four directions, four states ✅ *(built
   24 August 2026)*
-- UC30 weekly review as a swipe deck — four directions, four states
 - UC43 write timed items to a personal Google Calendar
 - UC14 critical flag from spoken cues *(already parsed; this is the delivery
   half — what `critical` actually changes)*
@@ -204,19 +206,37 @@ by the unique constraint, one row marked sent, five devices messaged.
 boundaries and the case that matters most — a decay the owner immediately
 undid still counts as part of the week.
 
-**Still outstanding on UC31:** the real Expo round trip. Five devices are
+*UC30 is bounded by owner's decision (D50):* the deck holds only what carries
+a decision — what decayed this week, and what is about to drop. Not everything
+on the shelf, which after a month is the wall `Today` is bounded to avoid,
+dealt one card at a time. What is *closed* — completed, dropped — is terminal
+and has no meaningful swipe, so it stays on the digest as counts you can
+expand. That is what keeps the two-minute exit criterion reachable.
+
+*Every card is aged twice* (D51), because the two numbers disagree: "shelved 4
+days ago" is how long the system has had it put away, "due 9 days ago" is how
+long you have been not doing it, and only the second is evidence. Left writes
+nothing at all — every card is already shelved, and recording the non-decision
+would restart its drop clock (D37) and turn "I did nothing" into "keep it
+another three months".
+
+**Still outstanding on UC31 and UC30:** the real Expo round trip. Five devices are
 registered against the live schema and an unannounced Monday "your week" push
 is not one to send on the owner's behalf; the first real one is due the coming
 Sunday at 9am IST, and the message that will go out has been printed and read.
 And the same last hop as every session before it — none of this has been seen
-on a phone.
+on a phone, which for the deck matters more than usual: it is the first screen
+in this app whose primary control is a gesture, and a swipe threshold chosen
+without a thumb is a guess.
 
 The calendar is one-way: the app owns the item, the event is a projection.
 Store `google_event_id`, reconcile app → Google only. Never build two-way
 merge — it is where this kind of project dies (D8).
 
 **Exit:** Sunday review takes under two minutes, and timed items appear in
-the calendar and stay in sync when edited.
+the calendar and stay in sync when edited. *The first half is now built and
+bounded so that it can be true; whether it actually is has to be measured with
+a thumb and a real week's worth of cards.*
 
 ---
 

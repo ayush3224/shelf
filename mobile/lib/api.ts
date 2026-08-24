@@ -331,8 +331,8 @@ export type DigestItem = {
   kind: 'task' | 'note' | 'person_note';
 };
 
-/** Something the system put away by itself during the week. */
-export type DecayedItem = DigestItem & {
+/** Something that changed state during the week. */
+export type MovedItem = DigestItem & {
   /** When the transition happened. */
   at: string;
   /**
@@ -341,10 +341,18 @@ export type DecayedItem = DigestItem & {
    * belongs in the week's account of what the system did.
    */
   state_now: ItemState;
+  /**
+   * When it was originally due, if it ever was. The review deck ages a card
+   * against this: "shelved 4 days ago" says how long it has been put away,
+   * "due 9 days ago" says how long you have been not doing it, and only the
+   * second is evidence about whether to keep it.
+   */
+  due_at: string | null;
 };
 
 /** Something shelved that is close to being dropped — and still recoverable. */
 export type ExpiringItem = DigestItem & {
+  due_at: string | null;
   untouched_since: string;
   drops_at: string;
 };
@@ -352,19 +360,30 @@ export type ExpiringItem = DigestItem & {
 /**
  * One week (UC31).
  *
- * Two lists in two different tenses. `shelved` and `dropped` are history and
- * will read the same in a year. `expiring` is a forecast off the shelf as it
+ * Four lists in two tenses. `shelved`, `dropped` and `done` are history and
+ * will read the same in a year; `expiring` is a forecast off the shelf as it
  * stands at `as_of`, and it moves the moment anything is touched.
+ *
+ * Cutting across that: `shelved` and `expiring` carry a decision and are what
+ * the review deck is built from (UC30). `dropped` and `done` are terminal —
+ * there is nothing to swipe — so the screen shows them collapsed behind their
+ * counts. Reading them is the whole point of them.
  */
 export type DigestResponse = {
   period_start: string;
   period_end: string;
   as_of: string;
-  shelved: DecayedItem[];
-  dropped: DecayedItem[];
+  /** Put away by decay. Carries a decision, so it goes in the deck (UC30). */
+  shelved: MovedItem[];
+  /** Expired off the shelf. Terminal — summary only. */
+  dropped: MovedItem[];
+  /** Finished, however you said so. Terminal — summary only. */
+  done: MovedItem[];
+  /** Still recoverable, and only until it is not. The deck's other half. */
   expiring: ExpiringItem[];
   shelved_total: number;
   dropped_total: number;
+  done_total: number;
   expiring_total: number;
   /** How far ahead the warning looks, for the section's own explanation. */
   warn_days: number;

@@ -5,6 +5,7 @@
  */
 import { useEffect } from 'react';
 import { ActivityIndicator, StyleSheet, View } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { Stack } from 'expo-router';
@@ -53,6 +54,7 @@ function RootNavigator() {
             sends you once a week (UC31), not somewhere you live. Four tabs
             is the ceiling (D44) and this is not the fifth. */}
         <Stack.Screen name="digest" />
+        <Stack.Screen name="review" />
       </Stack.Protected>
       <Stack.Protected guard={!session}>
         <Stack.Screen name="sign-in" />
@@ -63,12 +65,17 @@ function RootNavigator() {
 
 export default function RootLayout() {
   return (
-    <SafeAreaProvider>
-      <StatusBar style="dark" />
-      <AuthProvider>
-        <RootNavigator />
-      </AuthProvider>
-    </SafeAreaProvider>
+    // The review deck (UC30) is the only thing here driven by a gesture, and
+    // a pan handler outside this provider does not fail loudly — it simply
+    // never fires, which reads as a card that will not move.
+    <GestureHandlerRootView style={styles.root}>
+      <SafeAreaProvider>
+        <StatusBar style="dark" />
+        <AuthProvider>
+          <RootNavigator />
+        </AuthProvider>
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }
 
@@ -77,6 +84,7 @@ export default function RootLayout() {
 export { RouteError as ErrorBoundary } from '../lib/RouteError';
 
 const styles = StyleSheet.create({
+  root: { flex: 1 },
   splash: {
     flex: 1,
     alignItems: 'center',
