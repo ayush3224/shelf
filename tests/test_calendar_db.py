@@ -164,9 +164,21 @@ async def timed_item(db: Database, text: str = "Call the insurance guy") -> str:
     return item_id
 
 
+async def added_item(db: Database, text: str = "Call the insurance guy") -> str:
+    """A timed item the owner has put on the calendar (D59).
+
+    Two steps rather than one, and the split is the feature: the first is what
+    the parse does, the second is what the button does, and nothing but the
+    button does the second.
+    """
+    item_id = await timed_item(db, text)
+    await db.request_calendar(USER, item_id)
+    return item_id
+
+
 async def synced_item(db: Database, calendar: FakeCalendar) -> tuple[str, str]:
-    """A timed item that has already been through one sync."""
-    item_id = await timed_item(db)
+    """An added item that has already been through one sync."""
+    item_id = await added_item(db)
     await scheduler._sync_calendar(db)
     row = await link(db, item_id)
     assert row is not None and row["google_event_id"]
@@ -184,11 +196,30 @@ async def test_an_item_with_no_time_never_reaches_the_calendar(db):
     assert await link(db, item_id) is None
 
 
-async def test_gaining_a_due_time_queues_an_event(db):
-    """The parse supplying a time is what puts an item on the calendar."""
+async def test_gaining_a_due_time_does_not_queue_an_event(db):
+    """The whole of D59, in the test that used to assert the opposite.
+
+    A time is how a push knows when to fire. Treating it as a request for a
+    calendar entry buried the few real appointments in a week under thirty
+    reminders, which is what made the calendar unreadable.
+    """
     item_id = await timed_item(db)
+    assert await link(db, item_id) is None
+
+
+async def test_asking_for_it_is_what_queues_an_event(db):
+    """And the row is the request. Nothing else in the system writes one."""
+    item_id = await timed_item(db)
+
+    result = await db.request_calendar(USER, item_id)
+
+    assert result == {
+        "eligible": True,
+        "on_calendar": True,
+        "changed": True,
+        "sync_state": "pending",
+    }
     row = await link(db, item_id)
-    assert row is not None
     assert row["sync_state"] == "pending"
     assert row["google_event_id"] is None
 
@@ -276,26 +307,196 @@ async def test_clearing_the_due_time_takes_the_event_down(db, calendar):
     assert await link(db, item_id) is None
 
 
-async def test_a_reactivated_item_gets_a_fresh_event(db, calendar):
-    """The link is dropped rather than kept as a tombstone, so this has to work."""
-    item_id, first = await synced_item(db, calendar)
+async def test_a_reactivated_item_does_not_come_back_to_the_calendar(db, calendar):
+    """Completing something spends the request, and reactivating is not a new
+    one (D59). The link row went down with the event; only the button writes
+    another.
+
+    This test used to assert the opposite, and the reversal is deliberate: a
+    thing pulled back off the shelf weeks later is rarely still the appointment
+    it was, and putting it back would be the app deciding for the owner again.
+    """
+    item_id, event_id = await synced_item(db, calendar)
     await db.mark_done(item_id, USER)
     await scheduler._sync_calendar(db)
 
     await db.reactivate_item(item_id, USER)
     await scheduler._sync_calendar(db)
 
-    row = await link(db, item_id)
-    assert row is not None
-    assert row["google_event_id"] not in (None, first)
-    assert row["sync_state"] == "synced"
+    assert await link(db, item_id) is None
+    assert calendar.created == calendar.deleted == [event_id]
+
+
+# ------------------------------------------------- adding and removing (D59)
+#
+# The two things that create and destroy a link row, which is to say the two
+# things that decide whether an item is on the calendar at all. Everything in
+# the section above only keeps an event that already exists in step.
+
+
+async def test_adding_twice_is_a_retry_rather_than_a_duplicate(db, calendar):
+    """One row per item, and the second press is what revives a stalled one."""
+    item_id = await added_item(db)
+
+    again = await db.request_calendar(USER, item_id)
+
+    assert again["changed"] is False
+    assert again["on_calendar"] is True
+    await scheduler._sync_calendar(db)
+    assert len(calendar.created) == 1
+
+
+async def test_adding_clears_a_spent_attempt_count(db, calendar, monkeypatch):
+    """Otherwise a link that gave up during an outage is stuck listed-but-
+    absent until the item happens to be edited."""
+    monkeypatch.setattr(settings, "google_calendar_max_attempts", 1)
+    item_id = await added_item(db)
+    calendar.fail = gcal.CalendarError("Google returned 503")
+    await scheduler._sync_calendar(db)
+    assert (await link(db, item_id))["attempts"] == 1
+
+    calendar.fail = None
+    await db.request_calendar(USER, item_id)
+
+    assert (await link(db, item_id))["attempts"] == 0
+    assert await scheduler._sync_calendar(db) == (1, 0, 0)
+
+
+async def test_an_item_with_no_time_cannot_be_added(db):
+    """There is nothing to put in a day, and the trigger would never mark it
+    dirty either — the row would sit pending forever."""
+    item_id = await db.create_item(
+        user_id=USER, raw_text="read that paper", source="voice"
+    )
+
+    result = await db.request_calendar(USER, item_id)
+
+    assert result["eligible"] is False
+    assert await link(db, item_id) is None
+
+
+async def test_a_finished_item_cannot_be_added(db, calendar):
+    """`done` is what takes an event *down* (D54); adding one would queue a
+    write the next tick would immediately undo."""
+    item_id = await added_item(db)
+    await db.mark_done(item_id, USER)
+    await scheduler._sync_calendar(db)
+
+    result = await db.request_calendar(USER, item_id)
+
+    assert result["eligible"] is False
+    assert await link(db, item_id) is None
+
+
+async def test_a_shelved_item_can_still_be_added(db):
+    """Decay is silent and `shelved` keeps its event (D54), so it must also be
+    able to gain one — the alternative is a rule that depends on how long you
+    took to press the button."""
+    item_id = await timed_item(db)
+    await db.set_state(item_id, USER, "shelved")
+
+    result = await db.request_calendar(USER, item_id)
+
+    assert result["eligible"] is True
+
+
+async def test_an_item_that_is_not_yours_cannot_be_added(db):
+    item_id = await timed_item(db)
+    stranger = "00000000-0000-4000-8000-0000000000ff"
+
+    assert await db.request_calendar(stranger, item_id) is None
+    assert await link(db, item_id) is None
+
+
+async def test_removing_queues_the_event_and_forgets_the_link(db, calendar):
+    """Through the outbox, not inline — the same reason a deleted item's event
+    goes that way (D53). Google being down must not cost the removal."""
+    item_id, event_id = await synced_item(db, calendar)
+
+    result = await db.remove_calendar(USER, item_id)
+
+    assert result == {"changed": True, "on_calendar": False, "queued": True}
+    assert await link(db, item_id) is None
+    assert [d["google_event_id"] for d in await deletions(db)] == [event_id]
+
+    await scheduler._sync_calendar(db)
+    assert calendar.deleted == [event_id]
+    assert await deletions(db) == []
+
+
+async def test_removing_leaves_the_item_exactly_as_it_was(db, calendar):
+    """This is about where the item is shown, not about what it is. Its time,
+    its state and therefore its reminder are untouched."""
+    item_id, _ = await synced_item(db, calendar)
+    before = await db.get_item(item_id, USER)
+
+    await db.remove_calendar(USER, item_id)
+
+    after = await db.get_item(item_id, USER)
+    assert (after["state"], after["due_at"]) == (before["state"], before["due_at"])
+    assert after["on_calendar"] is False
+
+
+async def test_removing_before_it_ever_synced_queues_nothing(db):
+    """No event id, so there is no event to take down."""
+    item_id = await added_item(db)
+
+    result = await db.remove_calendar(USER, item_id)
+
+    assert result["queued"] is False
+    assert await deletions(db) == []
+    assert await link(db, item_id) is None
+
+
+async def test_removing_something_that_was_never_added_is_not_an_error(db):
+    item_id = await timed_item(db)
+
+    assert await db.remove_calendar(USER, item_id) == {
+        "changed": False,
+        "on_calendar": False,
+        "queued": False,
+    }
+
+
+async def test_editing_a_removed_item_does_not_put_it_back(db, calendar):
+    """The property the whole design rests on.
+
+    The trigger fires on every edit, and under 007 it would insert a row and
+    the item would reappear on the calendar the owner had just taken it off.
+    It updates and never inserts now, so an item with no row stays off however
+    much it is edited.
+    """
+    item_id, _ = await synced_item(db, calendar)
+    await db.remove_calendar(USER, item_id)
+    await scheduler._sync_calendar(db)
+    calendar.created.clear()
+
+    await db.update_item(item_id=item_id, user_id=USER, text="Call the broker")
+    await db.update_item(
+        item_id=item_id,
+        user_id=USER,
+        due_at=datetime.now(timezone.utc) + timedelta(days=2),
+        update_due=True,
+    )
+
+    assert await link(db, item_id) is None
+    assert await scheduler._sync_calendar(db) == (0, 0, 0)
+    assert calendar.created == []
+
+
+async def test_an_item_that_is_not_yours_cannot_be_removed(db, calendar):
+    item_id, _ = await synced_item(db, calendar)
+    stranger = "00000000-0000-4000-8000-0000000000ff"
+
+    assert await db.remove_calendar(stranger, item_id) is None
+    assert await link(db, item_id) is not None
 
 
 # ---------------------------------------------------------- reconciliation
 
 
 async def test_first_sync_creates_and_records_the_event(db, calendar):
-    item_id = await timed_item(db)
+    item_id = await added_item(db)
 
     written, removed, failed = await scheduler._sync_calendar(db)
 
@@ -372,7 +573,7 @@ async def test_an_event_deleted_in_google_comes_back(db, calendar):
 
 
 async def test_a_failed_sync_is_recorded_and_retried(db, calendar):
-    item_id = await timed_item(db)
+    item_id = await added_item(db)
     calendar.fail = gcal.CalendarError("Google returned 503")
 
     written, removed, failed = await scheduler._sync_calendar(db)
@@ -393,7 +594,7 @@ async def test_a_row_stops_being_retried_once_its_attempts_run_out(
 ):
     """A permanently broken row must not write to Google every minute forever."""
     monkeypatch.setattr(settings, "google_calendar_max_attempts", 2)
-    item_id = await timed_item(db)
+    item_id = await added_item(db)
     calendar.fail = gcal.CalendarError("Google returned 503")
 
     for _ in range(4):
@@ -407,7 +608,7 @@ async def test_editing_a_stalled_item_gives_it_another_chance(
 ):
     """Giving up is never permanent — a Google outage costs a stall, not an event."""
     monkeypatch.setattr(settings, "google_calendar_max_attempts", 1)
-    item_id = await timed_item(db)
+    item_id = await added_item(db)
     calendar.fail = gcal.CalendarError("Google returned 503")
     await scheduler._sync_calendar(db)
     assert (await link(db, item_id))["attempts"] == 1
@@ -421,7 +622,7 @@ async def test_editing_a_stalled_item_gives_it_another_chance(
 
 async def test_an_auth_failure_claims_nothing(db, monkeypatch):
     """One broken credential must not spend the whole backlog's attempts."""
-    item_id = await timed_item(db)
+    item_id = await added_item(db)
 
     async def refuse() -> str:
         raise gcal.CalendarError("bad key", retryable=False)
@@ -435,7 +636,7 @@ async def test_an_auth_failure_claims_nothing(db, monkeypatch):
 async def test_the_sync_is_skipped_when_no_calendar_is_configured(db, monkeypatch):
     """A deployment without a calendar ticks quietly (P1, single user)."""
     monkeypatch.setattr(settings, "google_calendar_id", "")
-    await timed_item(db)
+    await added_item(db)
     assert await scheduler._sync_calendar(db) == (0, 0, 0)
 
 
@@ -481,7 +682,7 @@ async def test_a_deletion_that_fails_stays_queued(db, calendar):
 
 async def test_deleting_an_item_that_was_never_synced_queues_nothing(db):
     """No event id, nothing to remove."""
-    item_id = await timed_item(db)
+    item_id = await added_item(db)
     await db.delete_item(item_id, USER)
     assert await deletions(db) == []
 
@@ -491,7 +692,7 @@ async def test_deleting_an_item_that_was_never_synced_queues_nothing(db):
 
 async def test_the_tick_syncs_the_calendar(db, calendar):
     """Step 8 is wired in, and its counts reach the log line."""
-    await timed_item(db)
+    await added_item(db)
 
     result = await scheduler.tick(db)
 
@@ -511,7 +712,7 @@ async def test_a_tick_in_another_suite_is_a_no_op(db, monkeypatch):
     This is what those suites see: no calendar id, so the step skips itself.
     """
     monkeypatch.setattr(settings, "google_calendar_id", "")
-    await timed_item(db)
+    await added_item(db)
 
     result = await scheduler.tick(db)
 
@@ -525,7 +726,7 @@ async def test_an_unstubbed_calendar_call_fails_loudly(db):
     first lock without meaning to. So the client is stubbed out as well, and
     a test that would have written to Google fails instead of writing.
     """
-    await timed_item(db)
+    await added_item(db)
 
     with pytest.raises(AssertionError, match="real Google Calendar"):
         await scheduler.tick(db)
@@ -543,3 +744,32 @@ async def test_an_item_dropped_by_the_tick_loses_its_event_on_the_same_tick(
 
     assert result.dropped == 1
     assert calendar.deleted == [event_id]
+
+
+async def test_removing_during_a_sync_does_not_orphan_the_event(
+    db, calendar, monkeypatch
+):
+    """The race D59 opened, and the reason the outbox is used for two things.
+
+    A link row can now disappear while the tick is mid-write — the owner
+    presses Remove during the second Google takes to create the event. Without
+    this, the event exists on the calendar and nothing in the system knows its
+    id, which is exactly what `calendar_deletions` was built to prevent (D53).
+    """
+    item_id = await added_item(db)
+
+    async def create_then_remove(calendar_id: str, event: gcal.CalendarEvent) -> str:
+        event_id = await FakeCalendar.create_event(calendar, calendar_id, event)
+        await db.remove_calendar(USER, item_id)
+        return event_id
+
+    monkeypatch.setattr(gcal, "create_event", create_then_remove)
+
+    await scheduler._sync_calendar(db)
+
+    assert await link(db, item_id) is None
+    # Written down rather than lost — and because the outbox is drained after
+    # the links in the same pass, the event that was just created comes back
+    # off inside the same tick.
+    assert calendar.created == calendar.deleted == ["evt-1"]
+    assert await deletions(db) == []

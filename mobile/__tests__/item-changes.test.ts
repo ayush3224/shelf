@@ -60,6 +60,9 @@ function detail(id: string, over: Partial<ItemDetail> = {}): ItemDetail {
     created_at: '2026-08-24T09:00:00Z',
     updated_at: '2026-08-24T09:00:00Z',
     people: [],
+    on_calendar: false,
+    calendar_sync_state: null,
+    calendar_stalled: false,
     ...over,
   };
 }

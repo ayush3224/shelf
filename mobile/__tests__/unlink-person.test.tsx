@@ -1,21 +1,21 @@
 /**
- * Unlinking, and the one question it asks (UC45, UC46, D58).
+ * Unlinking, which no longer asks anything (UC45, UC46, D60).
  *
  * An unlink is a correction to the filing: the item, its words and its
- * recording survive it, and linking back undoes it. So it does not confirm —
- * except where it is about to empty somebody who goes by other names, because
- * removing them discards those names and relinking does not bring them back.
+ * recording survive it, and linking back undoes it. So it does not confirm.
  *
- * The rule lives on the server, which answers 409 rather than doing it. What
- * is pinned here is the client's half: that a 409 becomes a question and not
- * an error message, that saying no changes nothing, and that saying yes
- * repeats the request with the confirmation on it.
+ * It did have one exception. Emptying somebody removes them and the names they
+ * went by, and relinking brings back the person but not the names — a real
+ * loss, and D58 put a dialog in front of it. D60 took the dialog away: the
+ * question arrived on ordinary unlinks often enough that answering it cost more
+ * than the names are worth. What is pinned here is that nothing asks any more,
+ * in either direction, and that one press means one request.
  */
 import { Alert } from 'react-native';
 import { render, screen, fireEvent, act } from '@testing-library/react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import { unlinkPerson } from '../lib/unlinkPerson';
+import { removeItemPerson } from '../lib/api';
 import { supabase } from '../lib/supabase';
 
 jest.mock('expo-secure-store');
@@ -47,9 +47,6 @@ jest.mock('../lib/auth', () => {
 
 const ITEM = 'b3f0c1a2-0000-4000-8000-000000000001';
 
-const PRIYA = { id: 'p1', name: 'Priya Sharma', aliases: ['Priya', 'P'] };
-const PANSY = { id: 'p2', name: 'Pansy', aliases: [] };
-
 type Sent = { url: string; method?: string };
 
 /** Answers each call in turn, so a retry can be given a different reply. */
@@ -74,15 +71,6 @@ const ok = (personRemoved = false) => ({
   body: { id: ITEM, people: [], changed: true, person_removed: personRemoved },
 });
 
-/** Press one button of whatever `Alert.alert` was last handed. */
-function answer(label: string): void {
-  const mock = Alert.alert as unknown as jest.Mock;
-  const buttons = mock.mock.calls.at(-1)?.[2] as
-    | { text: string; onPress?: () => void }[]
-    | undefined;
-  buttons?.find((b) => b.text === label)?.onPress?.();
-}
-
 beforeEach(() => {
   jest.spyOn(supabase.auth, 'getSession').mockResolvedValue({
     data: { session: { access_token: 'test-token' } },
@@ -94,87 +82,37 @@ beforeEach(() => {
 
 afterEach(() => jest.restoreAllMocks());
 
-describe('the ordinary unlink', () => {
-  it('does not ask, because linking back undoes it', async () => {
+describe('the unlink', () => {
+  it('is one request, with nothing to confirm on it', async () => {
     const sent = stubApi([ok()]);
 
-    await unlinkPerson(ITEM, PRIYA);
+    await removeItemPerson(ITEM, 'p1');
 
     expect(Alert.alert).not.toHaveBeenCalled();
     expect(sent).toHaveLength(1);
     expect(sent[0].method).toBe('DELETE');
     expect(sent[0].url).toContain(`/items/${ITEM}/people/p1`);
-    // No confirmation on a request nobody was asked about.
+    // The confirmation D58 added and D60 removed. Nothing sends it any more,
+    // and the server no longer looks for it.
     expect(sent[0].url).not.toContain('remove_person');
   });
 
-  it('does not ask when emptying somebody who has no other names', async () => {
-    // The commonest unlink there is — a name heard once that was never a
-    // person. The server allows it outright, so no 409 ever arrives.
+  it('does not ask before emptying somebody who goes by other names', async () => {
+    // The case D58 existed for: Priya Sharma's last note, with "Priya" and "P"
+    // recorded against her. It now goes the same way a cat named Pansy does.
     const sent = stubApi([ok(true)]);
 
-    const result = await unlinkPerson(ITEM, PANSY);
+    const result = await removeItemPerson(ITEM, 'p1');
 
     expect(Alert.alert).not.toHaveBeenCalled();
-    expect(result?.person_removed).toBe(true);
-    expect(sent).toHaveLength(1);
-  });
-});
-
-describe('emptying somebody who goes by other names', () => {
-  it('turns the refusal into a question that names them', async () => {
-    stubApi([{ status: 409 }, ok(true)]);
-
-    const pending = unlinkPerson(ITEM, PRIYA);
-    await act(async () => {
-      await Promise.resolve();
-    });
-
-    const [title, body] = (Alert.alert as unknown as jest.Mock).mock.calls[0];
-    expect(title).toContain('Priya Sharma');
-    expect(body).toContain('“Priya”');
-    expect(body).toContain('“P”');
-    // The distinction the whole dialog exists to make.
-    expect(body).toContain('Nothing you said is deleted');
-
-    answer('Remove');
-    await pending;
-  });
-
-  it('repeats the request with the confirmation when told to', async () => {
-    const sent = stubApi([{ status: 409 }, ok(true)]);
-
-    const pending = unlinkPerson(ITEM, PRIYA);
-    await act(async () => {
-      await Promise.resolve();
-    });
-    answer('Remove');
-    const result = await pending;
-
-    expect(sent).toHaveLength(2);
-    expect(sent[1].url).toContain('remove_person=true');
-    expect(result?.person_removed).toBe(true);
-  });
-
-  it('changes nothing when told no', async () => {
-    const sent = stubApi([{ status: 409 }]);
-
-    const pending = unlinkPerson(ITEM, PRIYA);
-    await act(async () => {
-      await Promise.resolve();
-    });
-    answer('Cancel');
-
-    // Null rather than a throw: the caller has nothing to report and nothing
-    // to repair. The first request already left the link where it was.
-    expect(await pending).toBeNull();
+    expect(result.person_removed).toBe(true);
     expect(sent).toHaveLength(1);
   });
 
-  it('lets every other failure through as a failure', async () => {
+  it('lets a failure through as a failure', async () => {
     stubApi([{ status: 500 }]);
 
-    await expect(unlinkPerson(ITEM, PRIYA)).rejects.toThrow();
+    await expect(removeItemPerson(ITEM, 'p1')).rejects.toThrow();
     expect(Alert.alert).not.toHaveBeenCalled();
   });
 });

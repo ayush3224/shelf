@@ -59,6 +59,11 @@ def detail(**overrides: Any) -> dict[str, Any]:
         "transcript_confidence": 0.71,
         "created_at": datetime(2026, 8, 23, 9, 0, tzinfo=timezone.utc),
         "updated_at": datetime(2026, 8, 23, 9, 0, tzinfo=timezone.utc),
+        # A time no longer implies an event (D59). Off the calendar unless the
+        # owner put it there, whatever hour it is due.
+        "on_calendar": False,
+        "calendar_sync_state": None,
+        "calendar_stalled": False,
     }
     base.update(overrides)
     return base
@@ -84,6 +89,10 @@ class StubDb(Database):
         self.unlinks: list[tuple[str, str]] = []
         self.link_result: Any = "auto"
         self.unlink_result: Any = "auto"
+        self.calendar_added: list[str] = []
+        self.calendar_removed: list[str] = []
+        self.calendar_result: Any = "auto"
+        self.calendar_remove_result: Any = "auto"
 
     async def today_items(self, user_id: str, before, limit: int = 200):
         return []
@@ -141,32 +150,55 @@ class StubDb(Database):
         self.people.append(entity)
         return {**entity, "added": True}
 
-    async def unlink_person(self, user_id, item_id, entity_id, remove_person=False):
-        self.unlinks.append((item_id, entity_id, remove_person))
+    async def unlink_person(self, user_id, item_id, entity_id):
+        self.unlinks.append((item_id, entity_id))
         if self.unlink_result != "auto":
             return self.unlink_result
         going = next((p for p in self.people if p["id"] == entity_id), None)
         if going is None:
             return None
-        # The stub has one item, so every link it holds is somebody's last.
-        # Whether that may proceed is therefore down to the aliases alone (D58).
-        aliases = list(going.get("aliases") or [])
-        if aliases and not remove_person:
-            return {
-                "entity_id": entity_id,
-                "blocked": True,
-                "person_removed": False,
-                "name": going["name"],
-                "aliases": aliases,
-            }
+        # The stub has one item, so every link it holds is somebody's last —
+        # and nothing asks about that any more (D60).
         self.people = [p for p in self.people if p["id"] != entity_id]
+        return {"entity_id": entity_id, "person_removed": True}
+
+    async def request_calendar(self, user_id, item_id):
+        self.calendar_added.append(item_id)
+        if self.calendar_result != "auto":
+            return self.calendar_result
+        if self.row is None or item_id != self.row["id"]:
+            return None
+        eligible = self.row["due_at"] is not None and self.row["state"] in (
+            "active",
+            "shelved",
+        )
+        already = bool(self.row["on_calendar"])
+        if eligible:
+            self.row = {
+                **self.row,
+                "on_calendar": True,
+                "calendar_sync_state": "pending",
+            }
         return {
-            "entity_id": entity_id,
-            "blocked": False,
-            "person_removed": True,
-            "name": going["name"],
-            "aliases": aliases,
+            "eligible": eligible,
+            "on_calendar": eligible or already,
+            "changed": eligible and not already,
+            "sync_state": "pending" if eligible else None,
         }
+
+    async def remove_calendar(self, user_id, item_id):
+        self.calendar_removed.append(item_id)
+        if self.calendar_remove_result != "auto":
+            return self.calendar_remove_result
+        if self.row is None or item_id != self.row["id"]:
+            return None
+        was = bool(self.row["on_calendar"])
+        self.row = {
+            **self.row,
+            "on_calendar": False,
+            "calendar_sync_state": None,
+        }
+        return {"changed": was, "on_calendar": False, "queued": was}
 
 
 @pytest.fixture
@@ -389,11 +421,9 @@ def test_the_detail_carries_who_the_item_is_linked_to(client, db):
     ]
     body = client.get(f"/items/{ITEM}", headers=auth()).json()
 
-    # The aliases ride along because the unlink has to be able to name what
-    # removing this person would cost (D58).
-    assert body["people"] == [
-        {"id": "e1", "name": "Priya Sharma", "type": "person", "aliases": ["Priya"]}
-    ]
+    # A name and somewhere to go, which is all a chip needs. The aliases used
+    # to ride along for the unlink dialog; both are gone (D58, D60).
+    assert body["people"] == [{"id": "e1", "name": "Priya Sharma", "type": "person"}]
 
 
 def test_an_item_with_nobody_on_it_says_so_rather_than_omitting_it(client, db):
@@ -495,9 +525,9 @@ def test_a_link_can_be_removed(client, db):
     assert response.json()["person_removed"] is True
 
 
-def test_emptying_a_person_who_goes_by_other_names_asks_first(client, db):
-    """The one part of an unlink that relinking does not undo (D58). The link
-    survives the refusal — a 409 here means nothing happened."""
+def test_emptying_a_person_who_goes_by_other_names_no_longer_asks(client, db):
+    """D58 answered 409 here so a client could confirm. D60 reversed it: the
+    names go, and the request that used to be refused now just works."""
     db.people = [
         {
             "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -511,12 +541,14 @@ def test_emptying_a_person_who_goes_by_other_names_asks_first(client, db):
         headers=auth(),
     )
 
-    assert response.status_code == 409
-    assert "Priya, P" in response.json()["detail"]
-    assert len(db.people) == 1
+    assert response.status_code == 200
+    assert response.json()["person_removed"] is True
+    assert db.people == []
 
 
-def test_confirming_removes_the_person_and_the_names(client, db):
+def test_the_confirmation_flag_is_gone_rather_than_ignored(client, db):
+    """A stale client sending it should not be quietly humoured — the route
+    does not take the parameter any more, so it is not part of the contract."""
     db.people = [
         {
             "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -525,35 +557,29 @@ def test_confirming_removes_the_person_and_the_names(client, db):
             "aliases": ["Priya"],
         }
     ]
-    response = client.delete(
+    client.delete(
         f"/items/{ITEM}/people/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
         "?remove_person=true",
         headers=auth(),
     )
 
-    assert response.status_code == 200
-    assert response.json()["person_removed"] is True
-    assert db.unlinks[-1][2] is True
+    # One argument short of what it used to be called with.
+    assert db.unlinks[-1] == (ITEM, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 
 
-def test_a_person_with_no_other_names_goes_without_asking(client, db):
-    """Nothing accumulated on them, and the name comes back with the next
-    mention — so a dialog here would be ceremony."""
+def test_an_items_people_do_not_carry_their_aliases(client, db):
+    """They were on the wire for the dialog and nothing else (D58, D60)."""
     db.people = [
         {
             "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-            "name": "Pansy",
+            "name": "Priya Sharma",
             "type": "person",
-            "aliases": [],
         }
     ]
-    response = client.delete(
-        f"/items/{ITEM}/people/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-        headers=auth(),
-    )
+    response = client.get(f"/items/{ITEM}", headers=auth())
 
     assert response.status_code == 200
-    assert response.json()["person_removed"] is True
+    assert "aliases" not in response.json()["people"][0]
 
 
 def test_removing_a_link_that_is_not_there_is_a_404(client, db):
@@ -574,3 +600,133 @@ def test_both_ends_of_the_correction_need_a_token(client, db):
         ).status_code
         == 401
     )
+
+
+# ------------------------------------------------------- the calendar (UC43)
+#
+# Adding used to be automatic for anything with a time (007). It is a button
+# now (D59), and these are the two ends of it. Neither route touches Google:
+# they write the decision down and the tick has a minute to make it true, which
+# is what stops a slow morning at Google turning into a failed tap.
+
+
+@pytest.fixture
+def calendar(monkeypatch) -> None:
+    """A calendar is configured, so the routes are open."""
+    monkeypatch.setattr(settings, "google_calendar_id", "owner@example.com")
+    monkeypatch.setattr(settings, "google_calendar_key_file", "key.json")
+
+
+def test_a_timed_item_starts_off_the_calendar(client, db, calendar):
+    """The change in one assertion: having a due time is not being on it."""
+    response = client.get(f"/items/{ITEM}", headers=auth())
+
+    assert response.status_code == 200
+    assert response.json()["on_calendar"] is False
+
+
+def test_adding_records_the_request_and_says_it_is_pending(client, db, calendar):
+    response = client.post(f"/items/{ITEM}/calendar", headers=auth())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["on_calendar"] is True
+    assert body["changed"] is True
+    # Not "synced". The event does not exist yet and saying so would be a lie
+    # the screen would repeat.
+    assert body["sync_state"] == "pending"
+    assert db.calendar_added == [ITEM]
+
+
+def test_adding_twice_is_a_retry_rather_than_a_duplicate(client, db, calendar):
+    client.post(f"/items/{ITEM}/calendar", headers=auth())
+    response = client.post(f"/items/{ITEM}/calendar", headers=auth())
+
+    assert response.status_code == 200
+    # Still on the calendar, but nothing was added — the press cleared the
+    # attempt count, which is the only way back for a link that gave up.
+    assert response.json()["on_calendar"] is True
+    assert response.json()["changed"] is False
+
+
+def test_an_item_with_no_time_cannot_be_put_on_a_calendar(client, db, calendar):
+    db.row = detail(due_at=None, state="shelved")
+
+    response = client.post(f"/items/{ITEM}/calendar", headers=auth())
+
+    assert response.status_code == 409
+    assert db.row["on_calendar"] is False
+
+
+def test_a_finished_item_cannot_be_put_on_a_calendar(client, db, calendar):
+    """`done` and `dropped` are what take an event *down* (D54). Adding one
+    would queue a write the tick would immediately undo."""
+    db.row = detail(state="done")
+
+    response = client.post(f"/items/{ITEM}/calendar", headers=auth())
+
+    assert response.status_code == 409
+
+
+def test_adding_an_item_that_is_not_yours_is_a_404(client, db, calendar):
+    db.calendar_result = None
+
+    response = client.post(f"/items/{ITEM}/calendar", headers=auth())
+
+    assert response.status_code == 404
+
+
+def test_adding_says_so_when_there_is_no_calendar_configured(client, db, monkeypatch):
+    """Otherwise the row sits pending forever and the screen says "adding…"
+    at an event that is never coming."""
+    monkeypatch.setattr(settings, "google_calendar_id", "")
+
+    response = client.post(f"/items/{ITEM}/calendar", headers=auth())
+
+    assert response.status_code == 503
+    assert db.calendar_added == []
+
+
+def test_removing_takes_it_off_and_queues_the_event(client, db, calendar):
+    db.row = detail(on_calendar=True, calendar_sync_state="synced")
+
+    response = client.delete(f"/items/{ITEM}/calendar", headers=auth())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["on_calendar"] is False
+    assert body["changed"] is True
+    # The event comes down through the outbox, not from this request (D53).
+    assert body["queued"] is True
+
+
+def test_removing_something_that_was_never_added_is_not_an_error(client, db, calendar):
+    response = client.delete(f"/items/{ITEM}/calendar", headers=auth())
+
+    assert response.status_code == 200
+    assert response.json()["changed"] is False
+
+
+def test_removing_needs_no_calendar_configured(client, db, monkeypatch):
+    """The row is the owner's, not Google's. Being unable to reach Google is
+    no reason to refuse to forget it."""
+    monkeypatch.setattr(settings, "google_calendar_id", "")
+    db.row = detail(on_calendar=True, calendar_sync_state="synced")
+
+    response = client.delete(f"/items/{ITEM}/calendar", headers=auth())
+
+    assert response.status_code == 200
+    assert response.json()["changed"] is True
+
+
+def test_removing_an_item_that_is_not_yours_is_a_404(client, db, calendar):
+    db.calendar_remove_result = None
+
+    response = client.delete(f"/items/{ITEM}/calendar", headers=auth())
+
+    assert response.status_code == 404
+
+
+def test_both_calendar_routes_need_a_token(client, db, calendar):
+    assert client.post(f"/items/{ITEM}/calendar").status_code == 401
+    assert client.delete(f"/items/{ITEM}/calendar").status_code == 401

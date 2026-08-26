@@ -82,6 +82,21 @@ async def entity_named(db: Database, name: str) -> Optional[dict[str, Any]]:
         return {"id": row[0], "name": row[1], "aliases": row[2]} if row else None
 
 
+async def all_entities(db: Database) -> list[dict[str, Any]]:
+    """Everybody on file, by name."""
+    async with db.connection() as conn:
+        result = await conn.execute(
+            f"""
+            SELECT name, aliases
+              FROM {settings.db_schema}.entities
+             WHERE user_id = %s
+             ORDER BY name
+            """,
+            (USER,),
+        )
+        return [{"name": r[0], "aliases": r[1]} for r in await result.fetchall()]
+
+
 async def entity_count(db: Database) -> int:
     async with db.connection() as conn:
         result = await conn.execute(
@@ -754,9 +769,13 @@ async def test_removing_the_last_link_removes_the_person(db):
     assert await entity_count(db) == 0
 
 
-async def test_emptying_a_person_who_goes_by_other_names_refuses(db):
-    """The one irreversible half of an unlink (D58). Relinking the item brings
-    the person back; it does not bring back the names the owner taught them."""
+async def test_emptying_a_person_takes_the_names_they_go_by(db):
+    """The irreversible half of an unlink, and it happens anyway (D60).
+
+    D58 refused this and made the caller confirm. The question turned up on
+    ordinary unlinks — the commonest one of all empties somebody — and the
+    owner would rather lose the aliases than answer it every time.
+    """
     first = await make_item(db)
     second = await make_item(db)
     await db.link_entities(USER, first, [person("Priya")])
@@ -764,48 +783,48 @@ async def test_emptying_a_person_who_goes_by_other_names_refuses(db):
     priya = await entity_named(db, "Priya Sharma")
     assert priya["aliases"] == ["Priya"]
 
-    # One at a time, the second is the last, and it is the one that refuses.
+    # One at a time; the second is the last, and it goes without a word.
     await db.unlink_person(USER, first, priya["id"])
-    blocked = await db.unlink_person(USER, second, priya["id"])
+    removed = await db.unlink_person(USER, second, priya["id"])
 
-    assert blocked["blocked"] is True
-    assert blocked["aliases"] == ["Priya"]
-    # Nothing happened: the refusal has to leave the link where it was.
-    assert [p["name"] for p in await db.item_people(second, USER)] == ["Priya Sharma"]
-    assert await entity_count(db) == 1
+    assert removed["person_removed"] is True
+    assert await entity_count(db) == 0
 
 
-async def test_confirming_removes_the_person_and_their_names(db):
+async def test_what_losing_the_aliases_actually_costs(db):
+    """Stated as behaviour rather than as a warning, because it is the price
+    D60 accepted: the next bare "Priya" resolves as if nothing was learned."""
     first = await make_item(db)
     second = await make_item(db)
     await db.link_entities(USER, first, [person("Priya")])
     await db.link_entities(USER, second, [person("Priya Sharma")])
     priya = await entity_named(db, "Priya Sharma")
     await db.unlink_person(USER, first, priya["id"])
+    await db.unlink_person(USER, second, priya["id"])
 
-    removed = await db.unlink_person(USER, second, priya["id"], remove_person=True)
+    # Said again, and filed under the short name — not folded onto the fuller
+    # one, because there is nothing left on file that connects the two.
+    await db.link_entities(USER, await make_item(db), [person("Priya")])
 
-    assert removed["blocked"] is False
-    assert removed["person_removed"] is True
-    assert await entity_count(db) == 0
+    assert [e["name"] for e in await all_entities(db)] == ["Priya"]
 
 
-async def test_a_person_with_no_other_names_still_goes_silently(db):
-    """The commonest unlink by far — a name heard once that was never a person.
-    There is nothing accumulated to lose, so asking would be ceremony."""
+async def test_a_person_with_no_other_names_goes_the_same_way(db):
+    """The commonest unlink by far — a name heard once that was never a
+    person. It never asked, and now nothing does."""
     item = await make_item(db)
     await db.link_entities(USER, item, [person("Pansy")])
     pansy = await entity_named(db, "Pansy")
 
     removed = await db.unlink_person(USER, item, pansy["id"])
 
-    assert removed["blocked"] is False
     assert removed["person_removed"] is True
     assert await entity_count(db) == 0
 
 
-async def test_aliases_do_not_block_an_unlink_that_leaves_them_standing(db):
-    """The guard is about emptying somebody, not about touching them."""
+async def test_an_unlink_that_leaves_somebody_standing_leaves_their_names_alone(db):
+    """Aliases are only ever lost with the person. Touching one of their notes
+    is not touching them."""
     first = await make_item(db)
     second = await make_item(db)
     await db.link_entities(USER, first, [person("Priya")])
@@ -814,14 +833,14 @@ async def test_aliases_do_not_block_an_unlink_that_leaves_them_standing(db):
 
     removed = await db.unlink_person(USER, first, priya["id"])
 
-    assert removed["blocked"] is False
     assert removed["person_removed"] is False
     assert await entity_count(db) == 1
+    assert (await entity_named(db, "Priya Sharma"))["aliases"] == ["Priya"]
 
 
-async def test_an_items_people_carry_the_names_they_go_by(db):
-    """The unlink dialog is built from these; without them it cannot say what
-    it is about to throw away."""
+async def test_an_items_people_do_not_carry_their_aliases(db):
+    """They were read by one thing — the dialog in front of an unlink — and it
+    is gone (D58, D60). A chip needs a name and somewhere to go."""
     first = await make_item(db)
     second = await make_item(db)
     await db.link_entities(USER, first, [person("Priya")])
@@ -830,7 +849,7 @@ async def test_an_items_people_carry_the_names_they_go_by(db):
     linked = await db.item_people(second, USER)
 
     assert [p["name"] for p in linked] == ["Priya Sharma"]
-    assert linked[0]["aliases"] == ["Priya"]
+    assert "aliases" not in linked[0]
 
 
 async def test_removing_a_link_leaves_the_item_alone(db):

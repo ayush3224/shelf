@@ -97,7 +97,9 @@ was. Links can also be written and removed by hand from item detail
 (`POST`/`DELETE /items/{id}/people`), and that path resolves a typed name only
 by exact name or a recorded alias — never by the token subset `resolve_entity`
 uses, because a name somebody typed is not a guess to be improved on. Removing
-an entity's last link removes the entity, the same rule UC49 follows.
+an entity's last link removes the entity **and its aliases**, the same rule
+UC49 follows, and it does so without asking — D58 confirmed it for two days and
+D60 withdrew the question.
 
 **Name resolution** (`resolve_entity` in `backend/db.py`, D43) decides which
 row a parsed name belongs to: the same name, then a recorded alias, then a
@@ -171,35 +173,43 @@ adding a second one, which would push the same phone twice. It also
 clears `disabled_at` — a token we had written off has just proved
 otherwise by turning up again.
 
-### `calendar_links` *(UC43, migration 007)*
+### `calendar_links` *(UC43, migrations 007, 008)*
 `item_id` (pk), `google_event_id`, `calendar_id`, `last_synced_at`,
 `sync_state` (`pending`\|`synced`\|`error`), `attempts`, `error_detail`.
 
 One-way: app → Google. Never merge back (D8).
 
-A row means *this item has, or should have, an event*. It is written by a
-trigger on `items`, not by the code that changes them (D53): the trigger fires
-when an item's `due_at`, `state`, or display text moves, and only then — an
-update that changed none of the three is not a reason to talk to Google.
+**A row is the owner's request** (D59, migration 008). It means *this item has,
+or should have, an event, because I said so* — written only by
+`POST /items/{id}/calendar` and removed only by the matching `DELETE` or by the
+tick taking the event down. Under 007 a row meant "this item has a due time",
+and the trigger inserted one for everything timed; that is what made the
+calendar unreadable.
+
+The trigger is still what notices drift (D53), and now only updates: when an
+item's `due_at`, `state` or display text moves it marks an existing row
+`pending`, and if there is no row it does nothing. An update that changed none
+of the three is not a reason to talk to Google either way.
 
 `calendar_id` is stored rather than assumed, so changing `GOOGLE_CALENDAR_ID`
 later cannot orphan the events already written to the old calendar. `attempts`
-is reset to zero every time the item is touched, so a row that gave up during
-an outage gets a fresh run at the next edit.
+is reset to zero every time the item is touched **and every time Add is pressed
+again**, which is the only way back for a link that gave up during an outage.
 
 The row is **deleted** once the event is gone and none is wanted, rather than
-kept as a tombstone. An item reactivated with a time gets a new row and a new
-event, which is what "the event is a projection" means.
+kept as a tombstone. So completing an item spends the request: reactivating it
+later leaves it off the calendar until it is added again.
 
 ### `calendar_deletions` *(UC43, migration 007)*
 `id`, `user_id`, `google_event_id`, `calendar_id`, `requested_at`,
 `attempts`, `last_error`. Unique on `(calendar_id, google_event_id)`.
 
-An outbox, and it exists for exactly one case: UC39 erases the item, and
-`calendar_links` cascades with it. A `before delete` trigger copies the event
-id here in the same transaction, and the tick performs the delete. Doing it
-inline in the request would orphan the event the first time Google was
-unreachable.
+An outbox, for the two cases where the link row that knows the event id is
+about to disappear. UC39 erases the item and `calendar_links` cascades with it,
+so a `before delete` trigger copies the event id here in the same transaction;
+and `DELETE /items/{id}/calendar` writes the same row itself before forgetting
+the link (D59). The tick performs the delete either way. Doing it inline in the
+request would orphan the event the first time Google was unreachable.
 
 `user_id` is deliberately **not** a foreign key. These rows are written while
 an item is being deleted, and deleting a user cascades through items to here —

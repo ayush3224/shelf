@@ -504,19 +504,17 @@ export function reactivateItem(
 
 // ------------------------------------------------------------- item detail
 
-/** One person an item is linked to (UC45). */
+/**
+ * One person an item is linked to (UC45).
+ *
+ * A name and somewhere to go, which is all a chip needs. It carried `aliases`
+ * for as long as an unlink asked before discarding them (D58); nothing reads
+ * them now that it does not (D60).
+ */
 export type LinkedPerson = {
   id: string;
   name: string;
   type: 'person' | 'org' | 'place';
-  /**
-   * The other names they go by.
-   *
-   * Here so an unlink can say what removing them would cost. Aliases are the
-   * record of resolutions that came out right, and they are the only part of a
-   * link removal that relinking the item does not restore (D58).
-   */
-  aliases: string[];
 };
 
 export type ItemDetail = {
@@ -545,6 +543,21 @@ export type ItemDetail = {
    * both. The item belongs on the Shelf and on her page at the same time.
    */
   people: LinkedPerson[];
+  /**
+   * Whether the owner has put this item on the calendar (UC43, D59).
+   *
+   * A time no longer implies an event — most captures carry one so a push
+   * knows when to fire. This is the answer to "did I add this", and it is
+   * what the button on item detail toggles.
+   */
+  on_calendar: boolean;
+  /** How the last sync went, or null when it is not on the calendar. */
+  calendar_sync_state: 'pending' | 'synced' | 'error' | null;
+  /**
+   * The sync gave up. Shown rather than swallowed: without it the screen says
+   * "adding…" forever at an item that is never going to appear.
+   */
+  calendar_stalled: boolean;
 };
 
 /** One item in full (UC37). */
@@ -625,23 +638,56 @@ export function addItemPerson(
  *
  * Nothing said is deleted — this corrects the filing, not the capture. The
  * person goes with their last link, the rule a split already follows (UC49):
- * a name with nothing behind it is clutter rather than data.
- *
- * Unless they go by other names, in which case the server answers 409 and
- * nothing happens until `removePerson` says the owner was asked (D58). Prefer
- * `unlinkPerson` in `lib/unlinkPerson` to calling this directly — it is that
- * exchange, written once.
+ * a name with nothing behind it is clutter rather than data, and the names
+ * they went by go quietly with them (D60).
  */
 export function removeItemPerson(
   itemId: string,
   entityId: string,
-  options: { removePerson?: boolean } = {},
 ): Promise<ItemPeopleResponse> {
-  const qs = options.removePerson ? '?remove_person=true' : '';
-  return request<ItemPeopleResponse>(
-    `/items/${itemId}/people/${entityId}${qs}`,
-    { method: 'DELETE' },
-  );
+  return request<ItemPeopleResponse>(`/items/${itemId}/people/${entityId}`, {
+    method: 'DELETE',
+  });
+}
+
+// ---------------------------------------------------------------- calendar
+
+export type CalendarResponse = {
+  id: string;
+  on_calendar: boolean;
+  /** False when the item was already where the press asked for it to be. */
+  changed: boolean;
+  sync_state: 'pending' | 'synced' | 'error' | null;
+  /** An event was handed to the outbox to come down on the next tick. */
+  queued: boolean;
+};
+
+/**
+ * Put this item on the calendar (UC43, D59).
+ *
+ * Neither of these waits for Google: the server writes down the decision and
+ * the tick reconciles it within a minute (D53), so the button cannot fail
+ * because Google is slow. It comes back `pending`, and the screen says so.
+ *
+ * Pressing it on an item that is already there is a retry rather than a
+ * duplicate — it is the way back for a sync that gave up.
+ */
+export function addToCalendar(itemId: string): Promise<CalendarResponse> {
+  return request<CalendarResponse>(`/items/${itemId}/calendar`, {
+    method: 'POST',
+  });
+}
+
+/**
+ * Take this item back off the calendar (UC43, D59).
+ *
+ * The item itself is untouched — same time, same state, same reminder. Only
+ * where it is shown changes.
+ */
+export function removeFromCalendar(itemId: string): Promise<CalendarResponse> {
+  return request<CalendarResponse>(`/items/${itemId}/calendar`, {
+    method: 'DELETE',
+  });
 }
 
 export type DeleteResponse = {

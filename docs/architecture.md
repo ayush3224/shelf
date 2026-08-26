@@ -326,27 +326,37 @@ be built before the manual version has been used.
 One-way, always: the app owns the item and the event is a projection of it
 (D8). Nothing reads Google's copy.
 
+- **The owner decides what goes on it** (D59, migration 008).
+  `POST /items/{id}/calendar` writes the `calendar_links` row and `DELETE`
+  takes it away again; nothing else creates one. A `calendar_links` row *is*
+  that request. Until 26 August 2026 every timed item was synced automatically,
+  which drowned the few real appointments in reminders — a due time is mostly
+  how a push knows when to fire.
 - **A service account** holds a key file on the VPS, and the owner shares the
   calendar with its address from Google's own sharing UI (D52). No consent
   screen, no refresh token, no expiry. Scope is `calendar.events` only.
 - **A trigger decides what is out of date.** `items` carries an
-  `after insert or update` trigger that marks `calendar_links` `pending`
-  whenever an item's due time, text or state moves — so the parse, an edit,
-  done, snooze, reactivate, a manual move and the tick's own decay and expiry
-  sweeps are all covered without any of them knowing the calendar exists
-  (D53, migration 007).
+  `after insert or update` trigger that marks an *existing* `calendar_links`
+  row `pending` whenever an item's due time, text or state moves — so the
+  parse, an edit, done, snooze, reactivate, a manual move and the tick's own
+  decay and expiry sweeps are all covered without any of them knowing the
+  calendar exists (D53, migrations 007 and 008). An item with no row is not
+  its business.
 - **The tick reconciles**, as step 8, after the sweeps. Wants an event and has
   none → create, and store the `google_event_id`. Wants one and has one →
   patch. Wants none and has one → delete. An idle tick makes no network call
   at all: it checks for dirty rows before it authenticates.
 - **`active` and `shelved` keep their event; `done` and `dropped` lose it**
-  (D54). Decay is silent, and an event disappearing would not be.
-- **Deleting an item (UC39)** writes its event id to `calendar_deletions` in
-  the same transaction, because the link row cascades away with the item. The
-  tick drains that outbox.
+  (D54). Decay is silent, and an event disappearing would not be. The row goes
+  with the event, so completing something spends the request: reactivating it
+  later leaves it off the calendar until it is added again.
+- **Removing by hand and deleting an item (UC39)** both write the event id to
+  `calendar_deletions` before the link row disappears, in the same transaction.
+  The tick drains that outbox.
 - **Failures retry** until `GOOGLE_CALENDAR_MAX_ATTEMPTS`, then stall and say
-  so in the log. Touching the item resets the count, so giving up is never
-  permanent. An event deleted by hand in Google is recreated (D55).
+  so in the log. Touching the item resets the count, and so does pressing Add
+  again, so giving up is never permanent. An event deleted by hand in Google is
+  recreated (D55).
 - Events are **transparent** and carry **no Google reminders**: the app is the
   reminder system (UC23), and these are moments rather than commitments.
 

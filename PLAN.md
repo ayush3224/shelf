@@ -177,8 +177,9 @@ the owner adjudicates.*
   expandable counts)*
 - UC30 weekly review as a swipe deck — four directions, four states ✅ *(built
   24 August 2026)*
-- UC43 write timed items to a personal Google Calendar ✅ *(built and
-  verified against the real calendar 24 August 2026)*
+- UC43 put an item on a personal Google Calendar by hand ✅ *(built and
+  verified against the real calendar 24 August 2026; narrowed from automatic
+  to user-led 26 August 2026, D59)*
 - UC14 critical flag from spoken cues *(already parsed; this is the delivery
   half — what `critical` actually changes)*
 
@@ -234,6 +235,14 @@ The calendar is one-way: the app owns the item, the event is a projection.
 Store `google_event_id`, reconcile app → Google only. Never build two-way
 merge — it is where this kind of project dies (D8).
 
+*What it projects was narrowed on 26 August 2026 (D59).* This plan and the use
+case both said "timed items", and that turned out to mean thirty reminders and
+four appointments on the same Thursday — a due time is mostly how a push knows
+when to fire. Adding is now a button on item detail and removing is the one
+beside it. None of the machinery below changed: the trigger still decides what
+has drifted, the tick still writes, the outbox still drains. Only the thing that
+starts it did.
+
 *Built with migration 007 and no new request path.* The credential is a
 service account with the calendar shared to it rather than the OAuth flow this
 plan assumed (D52), and the writing happens in the tick rather than in the
@@ -250,9 +259,11 @@ text and time patched the same event rather than making a second, marking it
 done removed it, and deleting the item drained its event through the outbox.
 The test event was removed and the calendar left with nothing on it.
 
-**Exit:** Sunday review takes under two minutes, and timed items appear in
-the calendar and stay in sync when edited. *The calendar half is now true and
-was measured. The review half is built and bounded so that it can be true;
+**Exit:** Sunday review takes under two minutes, and items put on the calendar
+appear there and stay in sync when edited. *The calendar half is now true and
+was measured — and the exit criterion itself was rewritten on 26 August 2026,
+because "timed items appear in the calendar" is no longer something that should
+be true (D59). The review half is built and bounded so that it can be true;
 whether it actually is has to be measured with a thumb and a real week's worth
 of cards.*
 

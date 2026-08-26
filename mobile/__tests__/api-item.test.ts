@@ -8,9 +8,11 @@
  */
 import {
   addItemPerson,
+  addToCalendar,
   deleteItem,
   editItem,
   item,
+  removeFromCalendar,
   removeItemPerson,
   setItemState,
 } from '../lib/api';
@@ -187,5 +189,37 @@ describe('linking a person to an item', () => {
 
     expect(result.people.map((p) => p.name)).toEqual(['Priya Sharma']);
     expect(result.changed).toBe(true);
+  });
+});
+
+describe('the calendar (UC43, D59)', () => {
+  const pending = {
+    id: ID,
+    on_calendar: true,
+    changed: true,
+    sync_state: 'pending',
+    queued: false,
+  };
+
+  it('adds with a POST and no body to get wrong', async () => {
+    const sent = stubApi(pending);
+    const result = await addToCalendar(ID);
+
+    expect(sent[0].url).toContain(`/items/${ID}/calendar`);
+    expect(sent[0].init.method).toBe('POST');
+    // The item id is the whole request. What goes in the event is read from
+    // the row by the tick, never sent from here.
+    expect(sent[0].init.body).toBeUndefined();
+    // Pending, not synced: the answer is "written down", not "on Google".
+    expect(result.sync_state).toBe('pending');
+  });
+
+  it('removes with a DELETE on the same path', async () => {
+    const sent = stubApi({ ...pending, on_calendar: false, queued: true });
+    const result = await removeFromCalendar(ID);
+
+    expect(sent[0].url).toContain(`/items/${ID}/calendar`);
+    expect(sent[0].init.method).toBe('DELETE');
+    expect(result.queued).toBe(true);
   });
 });

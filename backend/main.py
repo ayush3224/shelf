@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse
 from psycopg.errors import ForeignKeyViolation
 from pydantic import BaseModel, Field
 
-from backend import digest
+from backend import digest, gcal
 from backend.auth import PUBLIC_PATHS, authenticate, current_user_id
 from backend.config import capture_tz, settings
 from backend.db import Database, close_db, get_db, init_db
@@ -119,15 +119,14 @@ class AudioUrlResponse(BaseModel):
 class LinkedPerson(BaseModel):
     """One person an item is linked to (UC45).
 
-    `aliases` is here so an unlink can say what removing them would cost. It is
-    the record of resolutions that came out right, and the only part of a link
-    removal that relinking does not undo (D58).
+    A name and somewhere to go, which is all a chip needs. It carried
+    `aliases` for as long as an unlink asked before discarding them (D58);
+    with that dialog gone there is nothing left that reads them (D60).
     """
 
     id: str
     name: str
     type: str
-    aliases: list[str] = Field(default_factory=list)
 
 
 class ItemDetail(BaseModel):
@@ -158,6 +157,34 @@ class ItemDetail(BaseModel):
     created_at: datetime
     updated_at: datetime
     people: list[LinkedPerson] = Field(default_factory=list)
+    #: Whether the owner has put this item on the calendar (UC43, D59). Flat
+    #: rather than nested because that is how `get_item` returns it, and a
+    #: three-field object would be a shape to keep in step for no gain.
+    on_calendar: bool = False
+    #: How the last sync went: `pending`, `synced` or `error`. Null when the
+    #: item is not on the calendar at all.
+    calendar_sync_state: Optional[str] = None
+    #: The link has spent its attempts and will not retry on its own. The
+    #: screen has to say so, or it shows "adding…" forever.
+    calendar_stalled: bool = False
+
+
+class CalendarResponse(BaseModel):
+    """Response for the two calendar buttons on item detail (UC43, D59).
+
+    `changed` is false for a press that found the item already where it asked
+    for it to be, so the screen can say "already there" rather than claiming
+    to have done something.
+    """
+
+    id: str
+    on_calendar: bool
+    changed: bool
+    #: Where the sync stands afterwards, or null once it is off the calendar.
+    sync_state: Optional[str] = None
+    #: An event was handed to the outbox for removal. False when the item was
+    #: added and taken off again before the tick ever wrote anything.
+    queued: bool = False
 
 
 class PersonLinkRequest(BaseModel):
@@ -1817,24 +1844,20 @@ async def add_item_person(
 async def remove_item_person(
     item_id: UUID,
     entity_id: UUID,
-    remove_person: bool = False,
     db: Database = Depends(get_db),
     user_id: str = Depends(current_user_id),
 ) -> ItemPeopleResponse:
     """Detach an item from a person by hand (UC45, D45).
 
     The person goes with their last link, the same rule a split follows
-    (UC49) — a name with nothing behind it is clutter rather than data. Not if
-    they go by other names, though: that is a record the owner built by
-    correcting, and it does not come back. Emptying one of those answers 409
-    rather than doing it, and `remove_person` is the client saying it asked
-    (D58).
+    (UC49) — a name with nothing behind it is clutter rather than data. Their
+    aliases go too, and that is a real loss with no undo; it was worth a
+    confirmation for two days and is not any more (D60). Nothing that was
+    *said* is touched either way.
 
     Args:
         item_id: The item.
         entity_id: Who to detach.
-        remove_person: Confirmation that a person this empties may be removed
-            along with the names they go by.
         db: Database connection.
         user_id: Authenticated user, from the Supabase token.
 
@@ -1842,13 +1865,10 @@ async def remove_item_person(
         Everyone the item is linked to afterwards.
 
     Raises:
-        HTTPException: 404 if there was no such link, 409 if removing it would
-            discard an alias-bearing person and nobody has agreed to that.
+        HTTPException: 404 if there was no such link.
     """
     try:
-        removed = await db.unlink_person(
-            user_id, str(item_id), str(entity_id), remove_person=remove_person
-        )
+        removed = await db.unlink_person(user_id, str(item_id), str(entity_id))
     except Exception as e:
         logger.error("Failed to unlink %s from item %s: %s", entity_id, item_id, e)
         raise HTTPException(status_code=500, detail="Failed to remove that link")
@@ -1856,21 +1876,125 @@ async def remove_item_person(
     if removed is None:
         raise HTTPException(status_code=404, detail="No such link")
 
-    if removed["blocked"]:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"That is the last thing on {removed['name']}'s page, and they"
-                f" also go by {', '.join(removed['aliases'])}. Repeat with"
-                " remove_person=true to remove them and those names."
-            ),
-        )
-
     people = await db.item_people(str(item_id), user_id)
     return ItemPeopleResponse(
         id=str(item_id),
         people=[LinkedPerson(**p) for p in people],
         person_removed=removed["person_removed"],
+    )
+
+
+# ------------------------------------------------- the calendar (UC43, D59)
+#
+# Two routes, and between them they are the whole of what puts an item on the
+# calendar. Neither talks to Google: they write down what the owner decided,
+# and the tick reconciles it within a minute (D53). What that buys is a button
+# that cannot fail because Google is having a bad morning.
+
+
+@app.post("/items/{item_id}/calendar", response_model=CalendarResponse)
+async def add_item_to_calendar(
+    item_id: UUID,
+    db: Database = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+) -> CalendarResponse:
+    """Put this item on the calendar, because the owner asked (UC43, D59).
+
+    Adding used to be automatic for anything with a time. It made the calendar
+    worse: most captures carry a time so that a push knows when to fire, not
+    because they are appointments, and a day with four real commitments and
+    thirty reminders on it is a day you stop reading.
+
+    Pressing it on an item that is already there is a retry, not a duplicate —
+    it clears the attempt count, which is the only way back for a link that
+    gave up while Google was unreachable.
+
+    Args:
+        item_id: The item to project onto the calendar.
+        db: Database connection.
+        user_id: Authenticated user, from the Supabase token.
+
+    Returns:
+        Where the item now stands with the calendar.
+
+    Raises:
+        HTTPException: 404 if this user has no such item, 409 if the item has
+            no time to put on a calendar or has already ended, 503 if no
+            calendar is configured — in which case the row would sit pending
+            forever and saying so is better than pretending.
+    """
+    if not gcal.enabled():
+        raise HTTPException(
+            status_code=503, detail="No calendar is configured on this server"
+        )
+
+    try:
+        result = await db.request_calendar(user_id, str(item_id))
+    except Exception as e:
+        logger.error("Failed to add item %s to the calendar: %s", item_id, e)
+        raise HTTPException(status_code=500, detail="Failed to add to the calendar")
+
+    if result is None:
+        raise HTTPException(status_code=404, detail="No such item")
+
+    if not result["eligible"]:
+        raise HTTPException(
+            status_code=409,
+            detail=("An item needs a time and an open state to be on the calendar."),
+        )
+
+    return CalendarResponse(
+        id=str(item_id),
+        on_calendar=True,
+        changed=result["changed"],
+        sync_state=result["sync_state"],
+    )
+
+
+@app.delete("/items/{item_id}/calendar", response_model=CalendarResponse)
+async def remove_item_from_calendar(
+    item_id: UUID,
+    db: Database = Depends(get_db),
+    user_id: str = Depends(current_user_id),
+) -> CalendarResponse:
+    """Take this item back off the calendar (UC43, D59).
+
+    The item is not changed at all: same time, same state, same push. This is
+    only about where it is shown. Once adding is a decision, undoing it is the
+    other half of the same decision, and without this the only way off the
+    calendar would be to complete or drop something that is neither.
+
+    The event comes down on the next tick, through the outbox a deleted item
+    already uses (D53).
+
+    Args:
+        item_id: The item to take down.
+        db: Database connection.
+        user_id: Authenticated user, from the Supabase token.
+
+    Returns:
+        Where the item now stands with the calendar. `changed` is false if it
+        was not on it to begin with — which is the answer, not an error.
+
+    Raises:
+        HTTPException: 404 if this user has no such item.
+    """
+    try:
+        result = await db.remove_calendar(user_id, str(item_id))
+    except Exception as e:
+        logger.error("Failed to take item %s off the calendar: %s", item_id, e)
+        raise HTTPException(
+            status_code=500, detail="Failed to remove from the calendar"
+        )
+
+    if result is None:
+        raise HTTPException(status_code=404, detail="No such item")
+
+    return CalendarResponse(
+        id=str(item_id),
+        on_calendar=False,
+        changed=result["changed"],
+        queued=result["queued"],
     )
 
 

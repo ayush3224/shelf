@@ -17,6 +17,10 @@
  * among four. **Snooze** (UC17) is here as well as on the notification,
  * because "not now" is an answer you also give while looking at the thing.
  *
+ * **The calendar** (UC43) is here because it is a decision now, not a rule.
+ * Every timed item used to sync, which buried three real appointments under
+ * thirty reminders; adding one is a press, and so is taking it back off (D59).
+ *
  * **People** (UC45) is here for the same reason the rest of the screen is.
  * Every capture is scanned for who it names now, not just `person_note`s, so
  * a task can carry a person — and a wider net misses in both directions: a
@@ -44,10 +48,13 @@ import DateTimePicker from '@react-native-community/datetimepicker';
 import {
   ApiError,
   addItemPerson,
+  addToCalendar,
   deleteItem,
   editItem,
   item as fetchItem,
   reactivateItem,
+  removeFromCalendar,
+  removeItemPerson,
   setItemState,
   snoozeItem,
 } from '../../lib/api';
@@ -56,7 +63,6 @@ import { useAuth } from '../../lib/auth';
 import { publishItemChange } from '../../lib/itemEvents';
 import { PersonPicker } from '../../lib/PersonPicker';
 import { usePlayback } from '../../lib/playback';
-import { unlinkPerson } from '../../lib/unlinkPerson';
 import { capturedLabel, fullDueLabel } from '../../lib/time';
 import { color, radius, space } from '../../lib/theme';
 
@@ -79,6 +85,37 @@ function provenance(detail: ItemDetail): string | null {
   return null;
 }
 
+/**
+ * Whether this item could be on the calendar at all (UC43, D59).
+ *
+ * The same expression the server's `calendar_wanted` is: a time to show, and
+ * a state that has not ended. Mirrored here only to decide whether the block
+ * is drawn — the server refuses on its own, and it is the one that is right.
+ */
+function calendarPossible(detail: ItemDetail): boolean {
+  return (
+    detail.due_at !== null &&
+    (detail.state === 'active' || detail.state === 'shelved')
+  );
+}
+
+/** What the calendar block says under its button. */
+function calendarHint(detail: ItemDetail): string {
+  if (!detail.on_calendar) {
+    return 'A time is what makes this remind you. It goes on your calendar only if you put it there.';
+  }
+  if (detail.calendar_stalled) {
+    return 'Your calendar could not be reached, so nothing is on it yet. Try again when you have signal.';
+  }
+  if (detail.calendar_sync_state === 'synced') {
+    return 'On your calendar. Edits follow it there, and finishing this takes it down.';
+  }
+  if (detail.calendar_sync_state === 'error') {
+    return 'That did not get through. It tries again on its own.';
+  }
+  return 'Going on your calendar within the minute.';
+}
+
 export default function ItemScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { signOut } = useAuth();
@@ -91,6 +128,14 @@ export default function ItemScreen() {
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [picking, setPicking] = useState<'date' | 'time' | null>(null);
+  /**
+   * The date the first leg of the picker settled, waiting for the second.
+   *
+   * Changing the date asks for the time as well (D61), so the answer has to
+   * survive between the two pickers. Null means whatever is on screen is a
+   * single question — the `Time` chip on its own, or nothing.
+   */
+  const [pendingDate, setPendingDate] = useState<Date | null>(null);
   /** The person sheet is open (UC45). */
   const [linking, setLinking] = useState(false);
 
@@ -279,9 +324,11 @@ export default function ItemScreen() {
   /**
    * Take it off somebody's page. Nothing said is deleted (UC45, D45).
    *
-   * `unlinkPerson` rather than the raw call: emptying somebody who goes by
-   * other names discards those names, which is the one part of this that does
-   * not undo, and it asks before doing it (D58).
+   * No confirmation, in either case. The item, its words and its recording all
+   * survive, and linking back undoes it. Emptying somebody also discards the
+   * names they went by, which does *not* undo — that was worth a dialog for
+   * two days, and answering it every time cost more than the names are worth
+   * (D60). The toast is where it is mentioned instead.
    */
   const removePerson = useCallback(
     async (who: LinkedPerson) => {
@@ -290,13 +337,12 @@ export default function ItemScreen() {
       setError(null);
       setNotice(null);
       try {
-        const result = await unlinkPerson(id, who);
-        if (result === null) return; // Asked, and told no. Nothing changed.
+        const result = await removeItemPerson(id, who.id);
         setDetail({ ...detail, people: result.people });
         publishItemChange({ type: 'unlinked', id, entityId: who.id });
         setNotice(
           result.person_removed
-            ? `Off ${who.name}'s page — that was the last thing on it, so they are gone too.`
+            ? `Off ${who.name}'s page — that was the last thing on it, so they and any other names they went by are gone too.`
             : `Off ${who.name}'s page. The words are untouched.`,
         );
       } catch (e) {
@@ -307,6 +353,65 @@ export default function ItemScreen() {
     },
     [detail, busy, id, failed],
   );
+
+  /**
+   * Put this on the calendar, because it is an appointment (UC43, D59).
+   *
+   * Nothing waits for Google: the server writes the decision down and the tick
+   * has a minute to make it true (D53). Pressing it on something already there
+   * is the retry for a sync that gave up, which is why the notice distinguishes
+   * the two.
+   */
+  const putOnCalendar = useCallback(async () => {
+    if (!detail || busy) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await addToCalendar(id);
+      setDetail({
+        ...detail,
+        on_calendar: true,
+        calendar_sync_state: result.sync_state,
+        calendar_stalled: false,
+      });
+      setNotice(
+        result.changed
+          ? 'Added — it appears on your calendar within the minute.'
+          : 'Already on your calendar. Trying the sync again.',
+      );
+    } catch (e) {
+      await failed(e, 'Could not add this to your calendar.');
+    } finally {
+      setBusy(false);
+    }
+  }, [detail, busy, id, failed]);
+
+  /** Take it back off. The item keeps its time, its state and its push. */
+  const takeOffCalendar = useCallback(async () => {
+    if (!detail || busy) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await removeFromCalendar(id);
+      setDetail({
+        ...detail,
+        on_calendar: false,
+        calendar_sync_state: null,
+        calendar_stalled: false,
+      });
+      setNotice(
+        result.queued
+          ? 'Off your calendar — the event comes down within the minute.'
+          : 'Off your calendar. It still reminds you at its time.',
+      );
+    } catch (e) {
+      await failed(e, 'Could not take this off your calendar.');
+    } finally {
+      setBusy(false);
+    }
+  }, [detail, busy, id, failed]);
 
   const confirmDelete = useCallback(() => {
     if (!detail) return;
@@ -343,23 +448,47 @@ export default function ItemScreen() {
     );
   }, [detail, id, playback, failed]);
 
-  /** Merge a picked date or time into the existing due moment. */
+  /**
+   * Merge a picked date or time into the due moment, asking for both (D61).
+   *
+   * A date answered on its own used to keep the old time of day, which is
+   * almost never what was meant: moving something to Thursday moves it to a
+   * different part of the day too. So the date leg hands over to the time
+   * leg, and one edit is sent when both have been answered.
+   *
+   * Dismissing either leg abandons the whole change. A cancel is a cancel —
+   * writing the date alone is the behaviour this exists to stop.
+   */
   const onPicked = useCallback(
     (picked: Date | undefined) => {
       const mode = picking;
+      const carried = pendingDate;
       setPicking(null);
-      if (!picked || !detail) return;
+      if (!picked || !detail) {
+        setPendingDate(null);
+        return;
+      }
 
-      const base = detail.due_at ? new Date(detail.due_at) : new Date();
+      // The date leg's answer if there is one, so the time leg edits the day
+      // that was just chosen rather than the day the item came in with.
+      const base = carried ?? (detail.due_at ? new Date(detail.due_at) : new Date());
       const next = new Date(base);
+
       if (mode === 'date') {
         next.setFullYear(picked.getFullYear(), picked.getMonth(), picked.getDate());
-      } else {
-        next.setHours(picked.getHours(), picked.getMinutes(), 0, 0);
+        setPendingDate(next);
+        setPicking('time');
+        return;
       }
-      void apply({ due_at: next.toISOString() }, 'Time updated.');
+
+      next.setHours(picked.getHours(), picked.getMinutes(), 0, 0);
+      setPendingDate(null);
+      void apply(
+        { due_at: next.toISOString() },
+        carried ? 'Due date and time updated.' : 'Time updated.',
+      );
     },
-    [picking, detail, apply],
+    [picking, pendingDate, detail, apply],
   );
 
   if (loading) {
@@ -438,7 +567,7 @@ export default function ItemScreen() {
           <View style={styles.dueRow}>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Change the due date"
+              accessibilityLabel="Change the due date and time"
               disabled={busy}
               onPress={() => setPicking('date')}
               style={styles.chip}
@@ -471,10 +600,52 @@ export default function ItemScreen() {
 
           {picking ? (
             <DateTimePicker
-              value={detail.due_at ? new Date(detail.due_at) : new Date()}
+              value={
+                pendingDate ?? (detail.due_at ? new Date(detail.due_at) : new Date())
+              }
               mode={picking}
               onChange={(_event, picked) => onPicked(picked)}
             />
+          ) : null}
+
+          {calendarPossible(detail) || detail.on_calendar ? (
+            <>
+              <Text style={styles.label}>Calendar</Text>
+              <View style={styles.chipRow}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    detail.on_calendar
+                      ? 'Remove this from your calendar'
+                      : 'Add this to your calendar'
+                  }
+                  disabled={busy}
+                  onPress={() =>
+                    void (detail.on_calendar ? takeOffCalendar() : putOnCalendar())
+                  }
+                  style={[styles.chip, busy && styles.dimmed]}
+                >
+                  <Text style={styles.chipText}>
+                    {detail.on_calendar ? 'Remove from calendar' : 'Add to calendar'}
+                  </Text>
+                </Pressable>
+                {/* The only way back for a link that spent its attempts. The
+                    button beside it says Remove by then, so without this the
+                    item is stuck listed-but-absent until it is edited. */}
+                {detail.on_calendar && detail.calendar_stalled ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Try adding it to your calendar again"
+                    disabled={busy}
+                    onPress={() => void putOnCalendar()}
+                    style={[styles.chip, busy && styles.dimmed]}
+                  >
+                    <Text style={styles.chipText}>Try again</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+              <Text style={styles.hint}>{calendarHint(detail)}</Text>
+            </>
           ) : null}
 
           {detail.state === 'shelved' || detail.state === 'dropped' ? (

@@ -15,10 +15,11 @@ The tick is one ordered script, and the order is the design:
 5. **Enqueue** a push for everything due with nothing outstanding.
 6. **Send** what is queued.
 7. **Announce the week**, once, on digest day (UC31).
-8. **Reconcile the calendar** (UC43): every item whose Google event no longer
-   matches it, in either direction — one that has just gained a due time, one
-   whose text or time was edited, one that has been completed or dropped and
-   whose event should come down.
+8. **Reconcile the calendar** (UC43): every item the owner has *put* on the
+   calendar whose Google event no longer matches it — one just added, one
+   whose text or time was edited, one completed or dropped and whose event
+   should come down. Nothing here decides an item belongs on a calendar; that
+   is a button on item detail and only a button (D59).
 
 Steps 1-3 run before step 5 so that an item shelving on this tick does not
 also get a fresh push on it. Step 8 runs last, and after the sweeps for the
@@ -1042,10 +1043,15 @@ async def _sync_calendar(db: Database) -> tuple[int, int, int]:
     Three shapes of work, all of them falling out of one question the database
     already answered — should this item have an event?
 
+    Only items the owner has added are asked at all (D59): the question here
+    is never "does this item have a time", it is "is the event this row stands
+    for still right". A link row is the owner's request, and the answers are:
+
     - **Yes, and it has none.** Create one and remember its id.
     - **Yes, and it has one.** Patch it. The item's time or text has moved.
     - **No, and it has one.** Take it down: the item was completed, dropped,
-      or had its due time cleared.
+      or had its due time cleared. The row goes with it, so the item is off
+      the calendar for good unless it is added again.
 
     Plus the case the link table cannot hold, because the item is gone: UC39
     deletes leave their event id in `calendar_deletions` on the way out, and
@@ -1108,10 +1114,18 @@ async def _sync_calendar(db: Database) -> tuple[int, int, int]:
 
             if row["google_event_id"]:
                 await gcal.patch_event(target, row["google_event_id"], event)
-                await db.mark_calendar_synced(item_id, row["google_event_id"], target)
+                await db.mark_calendar_synced(
+                    item_id, row["google_event_id"], target, row["user_id"]
+                )
             else:
                 event_id = await gcal.create_event(default_calendar, event)
-                await db.mark_calendar_synced(item_id, event_id, default_calendar)
+                # The owner can press Remove while this create is in flight
+                # (D59). `mark_calendar_synced` notices the row has gone and
+                # sends the event straight to the deletion outbox rather than
+                # leaving it on the calendar with nothing pointing at it.
+                await db.mark_calendar_synced(
+                    item_id, event_id, default_calendar, row["user_id"]
+                )
             written += 1
 
         except gcal.CalendarError as e:
@@ -1119,8 +1133,9 @@ async def _sync_calendar(db: Database) -> tuple[int, int, int]:
                 # The event was deleted in Google and the item still wants
                 # one. The app is the source of truth, so it comes back on the
                 # next tick (D8) — the way to take something off the calendar
-                # is to complete or drop the item. `attempts` is deliberately
-                # not reset, so a pathological create/delete loop is bounded.
+                # is to press Remove on it (D59), which drops the row this
+                # loop works from. `attempts` is deliberately not reset, so a
+                # pathological create/delete loop is bounded.
                 logger.info(
                     "calendar: event for item %s is gone; recreating next tick",
                     item_id,
@@ -1238,7 +1253,8 @@ async def run_once() -> TickResult:
     if result.survey.calendar_stalled:
         logger.error(
             "%s calendar link(s) have exhausted their attempts; those items "
-            "are not on the calendar and will not be until they are edited",
+            "are not on the calendar and will not be until they are edited or "
+            "added again by hand",
             result.survey.calendar_stalled,
         )
     if result.undeliverable:

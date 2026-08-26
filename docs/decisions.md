@@ -809,7 +809,10 @@ once, and it was untestable where it was.
 
 **D58 — An unlink lives on the person page, and it asks exactly once: before
 throwing away the names somebody goes by.**
-*24 August 2026.*
+*24 August 2026. **The second half was reversed on 26 August 2026 — see D60.**
+The unlink still lives on the person page; it no longer asks anything. What
+follows is kept as written, because the argument for the dialog is sound and
+the reason it lost is not that it was wrong.*
 
 Removing a link was only ever on item detail, as an `×` on a person chip. But
 the page where a wrong link gets *noticed* is the person page — you open Priya
@@ -860,6 +863,146 @@ which a client-side check would have allowed. The exchange is written once, in
 
 *`LinkedPerson` now carries `aliases`* for the same reason — a dialog that
 cannot name what it is about to discard is not much of a warning.
+
+> **Superseded 26 August 2026 (D60).** The 409, the `remove_person` flag,
+> `lib/unlinkPerson.ts` and `LinkedPerson.aliases` are all gone. Everything
+> above the last two paragraphs still holds.
+
+
+---
+
+**D59 — The calendar is asked for, one item at a time. A due time is not a
+request for an event.** *26 August 2026.*
+
+UC43 shipped as "every timed item is written to the calendar", and that is the
+line in the use case. Two days of looking at the result is enough: it is wrong,
+and it is wrong because of what a due time *means* in this app.
+
+Almost everything captured here carries a time so that a **push** knows when to
+fire. "Chase the invoice Thursday" is a reminder; it occupies no part of
+Thursday. A handful of things a week are genuinely appointments — the dentist,
+the call at four. Syncing all of them puts thirty reminders and four
+appointments on the same surface, and the surface's whole value was that a
+glance at Thursday told you what Thursday was. Automatic sync did not add the
+calendar to the app; it subtracted the calendar from the day.
+
+So adding is an action: **Add to calendar** on item detail, with **Remove from
+calendar** beside it. `POST /items/{id}/calendar` and `DELETE`.
+
+*What changes is only what starts it.* The trigger, the outbox, the tick's step
+8, the retry ladder, the `attempts` reset, the one-way rule — all of D53 and D8
+stand exactly as they were, because none of that was ever about *whether* an
+item belongs on a calendar. It is about keeping an event that exists in step
+with the item it copies, which is a harder problem and is the part that was
+worth building.
+
+*The row is the request.* A `calendar_links` row used to mean "this item has a
+due time". It now means "the owner put this item on the calendar", and migration
+008 makes that true by taking the insert out of the trigger: it updates an
+existing row and never creates one. That is the whole enforcement, and it is in
+the database rather than in the routes for the same reason the trigger was —
+there are nine places that write to `items` and none of them should have to
+remember.
+
+*Consequences worth stating, because each of them will look like a bug once:*
+
+- **Editing a removed item does not put it back.** This is the point. Under 007
+  the trigger would have inserted a fresh row on the next edit and the event
+  would have returned a minute after the owner removed it.
+- **Completing an item spends the request.** `done` takes the event down and
+  the row goes with it (D54), so reactivating it weeks later leaves it off the
+  calendar. That is the honest default: a thing pulled back off the shelf is
+  rarely still the appointment it was.
+- **Pressing Add on something already there is a retry**, not a duplicate. It
+  clears `attempts`, which is otherwise only reset by editing the item — so
+  without it a link that gave up during an outage is stuck listed-but-absent.
+  The screen shows a **Try again** control precisely when that has happened,
+  because by then the main button says Remove.
+- **Removing is not completing.** The item keeps its time, its state and its
+  push. Only where it is *shown* changes.
+
+*One race is new and is closed rather than tolerated.* A link row can now
+disappear while the tick is mid-write — the owner presses Remove during the
+second Google takes to create the event — and the event would exist on the
+calendar with nothing left in the system holding its id. That is the failure
+`calendar_deletions` was built for (D53), so `mark_calendar_synced` notices its
+update touched no row and sends the event straight to the outbox. Because the
+outbox is drained after the links in the same pass, it usually comes back off
+within the same tick.
+
+*Migration 008 keeps what is already on the calendar.* Rows that reached Google
+have real events on a real calendar, and deleting them silently is the "things
+are vanishing" failure `CLAUDE.md` warns about. Rows that never synced are work
+nobody asked for, and they are deleted so the next tick does not do it anyway.
+
+*The 503.* `POST` refuses when no calendar is configured rather than writing a
+row that would sit `pending` forever behind a screen saying "adding…". The
+`DELETE` does not, because forgetting the owner's own row needs no Google.
+
+*Revisit if:* adding turns out to be something the owner does to nearly
+everything with a time, which would mean the automatic rule was right and the
+problem was elsewhere. The evidence will be visible — a `calendar_links` count
+close to the count of timed items.
+
+---
+
+**D60 — Emptying a person takes their aliases, silently. D58's dialog is
+withdrawn.** *26 August 2026. Owner's decision, by preference.*
+
+D58 is two days old and its argument still reads correctly: removing the last
+note about somebody removes them, that discards the names they went by, and
+relinking the item restores the person but not the names. It is the one part of
+an unlink that does not undo, and D45 leans on those corrections.
+
+It is withdrawn anyway, and the reason is not a flaw in the argument. **The
+question arrives too often for what it protects.** The commonest unlink in this
+app is the one-mention false positive, which by definition empties somebody, so
+the dialog fires on the ordinary case rather than the rare one. Aliases
+accumulate on anybody mentioned twice under two spellings, so "has aliases" is
+not the narrow filter D58 assumed. The owner would rather lose the names than
+answer a question every time, and that is a preference about their own data,
+which makes it the end of the discussion rather than the start of one.
+
+*What actually goes:* the 409 and the `remove_person` parameter on
+`DELETE /items/{id}/people/{entity_id}`, `lib/unlinkPerson.ts` entirely, and
+`LinkedPerson.aliases` on the wire — which existed only so the dialog could name
+what it was discarding. Both screens call `removeItemPerson` directly again. The
+person page and item detail behave identically, which they always should have.
+
+*What is lost, stated plainly rather than as a warning:* after emptying Priya
+Sharma, the next bare "Priya" is a new person. There is a test that says so,
+because it is the price and prices belong in the suite.
+
+*This was considered and reversed; it is not an open question.* Both directions
+have been implemented and lived with. If the alias loss ever bites, the answer
+is not to restore the dialog — it is to stop discarding aliases at all, which
+would mean keeping emptied people or writing their names somewhere that survives
+them. Reviving D58 as written should not be proposed again.
+
+---
+
+**D61 — Changing a due date asks for the time too.** *26 August 2026.*
+
+The picker had a date leg and a time leg and they were independent: answering
+the date kept whatever time of day the item already had. That is almost never
+what was meant. A due time arrives from the sentence it was captured in —
+"Thursday at three" — and moving the item to a different day is precisely the
+moment that three o'clock stops applying. The old behaviour silently carried an
+inherited time onto a day it was never chosen for.
+
+So the date leg hands over to the time leg, and one edit is sent when both have
+been answered. The `Time` chip on its own is untouched: changing only the time
+is a single question and always was.
+
+*Dismissing either leg writes nothing at all.* Saving the date and leaving the
+time to be dealt with later is the exact half-answer this exists to prevent, and
+a back-press is not a confirmation. The cost is that backing out of the second
+question discards the first, which is one extra tap on a rare path.
+
+*It is one edit, not two.* Two `PATCH`es would put the item on the calendar at
+the wrong time for up to a minute (D59), log two `manual` transitions for one
+decision, and fire two pushes' worth of rescheduling. The pending date is held
+in the screen's state until the time answers it.
 
 
 ## Open

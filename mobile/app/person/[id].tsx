@@ -56,6 +56,7 @@ import {
   ApiError,
   mergePerson,
   person as fetchPerson,
+  removeItemPerson,
   splitPerson,
 } from '../../lib/api';
 import type { ItemState, Person, PersonItem } from '../../lib/api';
@@ -68,7 +69,6 @@ import {
 import { PersonPicker } from '../../lib/PersonPicker';
 import { usePlayback } from '../../lib/playback';
 import { capturedOnLabel } from '../../lib/time';
-import { unlinkPerson } from '../../lib/unlinkPerson';
 import { color, radius, space } from '../../lib/theme';
 
 /** Plain words. Nothing on a person page is an alarm. */
@@ -428,13 +428,13 @@ export default function PersonScreen() {
   );
 
   /**
-   * Take one item off this page (UC45, D58).
+   * Take one item off this page (UC45, D60).
    *
-   * No dialog: the item, its words and its recording are untouched, and adding
-   * the link back on item detail undoes it. `unlinkPerson` puts up the one
-   * question there is — the last note on somebody who goes by other names,
-   * where removing them discards names the owner taught the app — and the
-   * server is what insists on it, so a stale count here cannot skip it.
+   * No dialog at all. The item, its words and its recording are untouched, and
+   * adding the link back on item detail undoes it. Emptying this page removes
+   * the person and the names they went by, which does not undo — that was a
+   * confirmation for two days, and the owner would rather lose the names than
+   * answer the question (D60).
    */
   const unlink = useCallback(
     async (itemId: string) => {
@@ -443,8 +443,7 @@ export default function PersonScreen() {
       setError(null);
       setNotice(null);
       try {
-        const result = await unlinkPerson(itemId, who);
-        if (result === null) return; // Asked, and told no. Nothing changed.
+        const result = await removeItemPerson(itemId, who.id);
         // Published rather than filtered by hand: this screen is a listener
         // like any other, and item detail may be showing the same link.
         publishItemChange({ type: 'unlinked', id: itemId, entityId: who.id });

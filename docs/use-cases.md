@@ -128,24 +128,34 @@ notice it is wrong.
 2026, D58). A wrong link shows up as something on Priya's page that is not
 about Priya; the repair used to be two screens away. It removes the link and
 nothing else — the item, its words and its recording are untouched, and linking
-back undoes it, so it does not confirm. The single exception is the last note on
-somebody who goes by other names: emptying a person removes them, and their
-aliases are corrections the owner made that relinking does not restore. That
-one asks, and the server refuses it until it has been asked.
+back undoes it, so it does not confirm.
+
+**Nothing confirms, including emptying somebody** (26 August 2026, D60). D58
+made one exception: the last note on a person who goes by other names, because
+removing them discards the aliases and relinking does not bring them back. The
+exception is withdrawn by the owner's preference — the names are worth less
+than a question on every unlink. Emptying a person removes them and their
+aliases, silently.
 
 ## Integrations
 
 | ID | Use case | Pri |
 |----|----------|-----|
-| UC43 | Write to personal Google Calendar from the app | P1 |
+| UC43 | Put an item on the personal Google Calendar by hand, and take it off again | P1 |
 | UC44 | Obsidian-style linked network of people and notes | P2 |
 
-**UC43 is built** (24 August 2026) and is one-way by construction (D8). An
-item projects an event while it has a due time and has not ended: `active` and
-`shelved` both keep one, `done` and `dropped` take it down (D54). Nothing is
-ever read back — an event deleted by hand inside Google Calendar is recreated
-on the next tick (D55), and the way to take something off the calendar is to
-complete or drop the item.
+**UC43 is built** (24 August 2026) and is one-way by construction (D8).
+**Narrowed by the owner 26 August 2026 (D59):** it was written as "every timed
+item syncs", and that turned out to bury the few real appointments in a week
+under thirty reminders — a time is mostly how a push knows when to fire. So
+adding is an explicit action on item detail, with a matching one to remove.
+
+Once an item is on the calendar, everything that was built for keeping it there
+still applies: the event follows edits to the text and the time, `active` and
+`shelved` both keep one, and `done` and `dropped` take it down (D54). Nothing
+is ever read back — an event deleted by hand inside Google Calendar is
+recreated on the next tick (D55). The way to take something off the calendar is
+now the Remove button rather than completing the item.
 
 UC27 was folded into this and stays folded: a reminder that lands as a calendar
 entry is this, and there is no second delivery tier hiding in it.

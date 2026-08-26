@@ -820,8 +820,14 @@ class Database:
         """One item in full, for the detail screen (UC37, UC38).
 
         Returns more than `Today` does: the raw transcript, which is what UC38
-        edits against, and the transcription provenance, which is what explains
-        a flagged row to the person looking at it.
+        edits against, the transcription provenance, which is what explains a
+        flagged row to the person looking at it, and whether the owner has put
+        it on the calendar — since UC43 became a decision rather than a rule
+        (D59), this screen is where that decision is made and undone.
+
+        `calendar_stalled` is not a nicety. A link that has spent its attempts
+        is not going to sync on its own, and a screen that shows it as pending
+        forever would be quietly lying about where the item is.
 
         Args:
             item_id: Item to load.
@@ -835,25 +841,35 @@ class Database:
         async with pool.connection() as conn:
             result = await conn.execute(
                 f"""
-                SELECT id::text,
-                       coalesce(nullif(parsed_text, ''), raw_text) AS text,
-                       raw_text,
-                       parsed_text,
-                       kind::text,
-                       state::text,
-                       due_at,
-                       critical,
-                       parse_status::text,
-                       source::text,
-                       audio_path IS NOT NULL AS has_audio,
-                       transcript_source::text,
-                       transcript_confidence,
-                       created_at,
-                       updated_at
-                  FROM {settings.db_schema}.items
-                 WHERE id = %s AND user_id = %s
+                SELECT i.id::text,
+                       coalesce(nullif(i.parsed_text, ''), i.raw_text) AS text,
+                       i.raw_text,
+                       i.parsed_text,
+                       i.kind::text,
+                       i.state::text,
+                       i.due_at,
+                       i.critical,
+                       i.parse_status::text,
+                       i.source::text,
+                       i.audio_path IS NOT NULL AS has_audio,
+                       i.transcript_source::text,
+                       i.transcript_confidence,
+                       i.created_at,
+                       i.updated_at,
+                       l.item_id IS NOT NULL AS on_calendar,
+                       l.sync_state::text AS calendar_sync_state,
+                       coalesce(l.attempts >= %(max_attempts)s, false)
+                           AS calendar_stalled
+                  FROM {settings.db_schema}.items i
+                  LEFT JOIN {settings.db_schema}.calendar_links l
+                         ON l.item_id = i.id
+                 WHERE i.id = %(item_id)s AND i.user_id = %(user_id)s
                 """,
-                (item_id, user_id),
+                {
+                    "item_id": item_id,
+                    "user_id": user_id,
+                    "max_attempts": settings.google_calendar_max_attempts,
+                },
             )
             columns = [c.name for c in result.description or []]
             row = await result.fetchone()
@@ -1237,15 +1253,15 @@ class Database:
                 guessed id cannot read somebody else's links.
 
         Returns:
-            The linked entities, by name, each with the other names they go
-            by — an unlink has to be able to say what removing them would
-            cost, and the alias list is that cost (D58).
+            The linked entities, by name. Not their aliases: the only thing
+            that ever read those was the dialog D58 put in front of an unlink,
+            and D60 took it away again.
         """
         pool = await self._ensure_pool()
         async with pool.connection() as conn:
             result = await conn.execute(
                 f"""
-                SELECT e.id::text, e.name, e.type::text, e.aliases
+                SELECT e.id::text, e.name, e.type::text
                   FROM {settings.db_schema}.links l
                   JOIN {settings.db_schema}.entities e ON e.id = l.entity_id
                   JOIN {settings.db_schema}.items i ON i.id = l.item_id
@@ -1367,11 +1383,7 @@ class Database:
         return {**entity, "added": bool(linked.rowcount)}
 
     async def unlink_person(
-        self,
-        user_id: str,
-        item_id: str,
-        entity_id: str,
-        remove_person: bool = False,
+        self, user_id: str, item_id: str, entity_id: str
     ) -> Optional[dict[str, Any]]:
         """Detach an item from a person by hand.
 
@@ -1385,64 +1397,23 @@ class Database:
         data. Nothing said about them is touched, because by then there is
         nothing said about them.
 
-        **Unless they go by other names** (D58). An alias is the residue of a
-        resolution that came out right — a bare "Priya" filed onto "Priya
-        Sharma", or a name folded in by a merge — and it is the one part of an
-        unlink that relinking the item does not restore. So an unlink that
-        would empty an alias-bearing person refuses instead, and says what it
-        would have destroyed; `remove_person` is the caller reporting that it
-        asked. A person with no aliases holds nothing but a name, which the
-        next mention recreates, so that case still goes without asking.
+        **Including the names they went by** (D60). Emptying somebody discards
+        their aliases, and relinking the item brings back the person but not
+        those names — a real loss, and it used to be worth a dialog (D58). It
+        is not: the price of never losing them is a question on every unlink,
+        and the owner would rather lose them. The next mention of a bare
+        "Priya" resolves as it did the first time.
 
         Args:
             user_id: Owner.
             item_id: The item.
             entity_id: Who to detach.
-            remove_person: Permission to remove a person this would empty even
-                though they go by other names. Ignored in every other case.
 
         Returns:
-            What happened, `blocked` if it needs asking about first, or None if
-            there was no such link to remove.
+            What happened, or None if there was no such link to remove.
         """
         pool = await self._ensure_pool()
         async with pool.connection() as conn:
-            # What the link is attached to, and whether anything else is
-            # holding the person up. Counted *before* the delete, so that the
-            # refusal below can happen without having destroyed anything.
-            found = await conn.execute(
-                f"""
-                SELECT e.name,
-                       e.aliases,
-                       (SELECT count(*)
-                          FROM {settings.db_schema}.links x
-                         WHERE x.entity_id = e.id
-                           AND x.item_id <> l.item_id) AS elsewhere
-                  FROM {settings.db_schema}.links l
-                  JOIN {settings.db_schema}.entities e ON e.id = l.entity_id
-                  JOIN {settings.db_schema}.items i ON i.id = l.item_id
-                 WHERE l.item_id = %(item_id)s
-                   AND l.entity_id = %(entity_id)s
-                   AND i.user_id = %(user_id)s
-                   AND e.user_id = %(user_id)s
-                 LIMIT 1
-                """,
-                {"item_id": item_id, "entity_id": entity_id, "user_id": user_id},
-            )
-            row = await found.fetchone()
-            if row is None:
-                return None
-            name, aliases, elsewhere = row[0], list(row[1] or []), row[2]
-
-            if elsewhere == 0 and aliases and not remove_person:
-                return {
-                    "entity_id": entity_id,
-                    "blocked": True,
-                    "person_removed": False,
-                    "name": name,
-                    "aliases": aliases,
-                }
-
             removed = await conn.execute(
                 f"""
                 DELETE FROM {settings.db_schema}.links l
@@ -1477,10 +1448,7 @@ class Database:
 
         return {
             "entity_id": entity_id,
-            "blocked": False,
             "person_removed": person_removed,
-            "name": name,
-            "aliases": aliases,
         }
 
     async def merge_people(
@@ -2344,6 +2312,158 @@ class Database:
             return [dict(zip(columns, row)) for row in await result.fetchall()]
 
     # ---------------------------------------------------- calendar (UC43)
+    #
+    # The calendar is opt-in, one item at a time (D59). These two are the
+    # only things in the system that create or destroy a `calendar_links`
+    # row, and that row is the whole of the owner's intent: everything below
+    # them — the trigger, the claim, the outbox — only keeps an event that
+    # already exists in step with the item it is a copy of.
+
+    async def request_calendar(
+        self, user_id: str, item_id: str
+    ) -> Optional[dict[str, Any]]:
+        """Put an item on the calendar, because the owner said so (UC43, D59).
+
+        Writing the row is the whole of the work. The event itself is created
+        by the next tick, for the same reason every other calendar write is
+        (D53): a Google outage should cost a retry, not a failed tap.
+
+        Pressing it again on an item that is already there is not an error and
+        not a duplicate — it resets `attempts`, which makes the button the
+        retry for a sync that gave up while Google was unreachable. There is
+        no other way to revive a stalled link short of editing the item.
+
+        Args:
+            user_id: Owner.
+            item_id: The item to project onto the calendar.
+
+        Returns:
+            What happened, or None if this user has no such item. `eligible`
+            is false when the item has no time to put on a calendar, or has
+            ended — in which case nothing is written.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            found = await conn.execute(
+                f"""
+                SELECT {settings.db_schema}.calendar_wanted(i.state, i.due_at),
+                       l.item_id IS NOT NULL,
+                       l.sync_state::text
+                  FROM {settings.db_schema}.items i
+                  LEFT JOIN {settings.db_schema}.calendar_links l
+                         ON l.item_id = i.id
+                 WHERE i.id = %s AND i.user_id = %s
+                """,
+                (item_id, user_id),
+            )
+            row = await found.fetchone()
+            if row is None:
+                return None
+            wanted, already, sync_state = bool(row[0]), bool(row[1]), row[2]
+
+            if not wanted:
+                return {
+                    "eligible": False,
+                    "on_calendar": already,
+                    "changed": False,
+                    "sync_state": sync_state,
+                }
+
+            await conn.execute(
+                f"""
+                INSERT INTO {settings.db_schema}.calendar_links
+                            (item_id, sync_state)
+                     VALUES (%s, 'pending')
+                ON CONFLICT (item_id) DO UPDATE
+                        SET sync_state = 'pending',
+                            attempts = 0,
+                            error_detail = null
+                """,
+                (item_id,),
+            )
+
+        return {
+            "eligible": True,
+            "on_calendar": True,
+            # False when it was already there. The screen says "already on
+            # your calendar" rather than claiming to have done something.
+            "changed": not already,
+            "sync_state": "pending",
+        }
+
+    async def remove_calendar(
+        self, user_id: str, item_id: str
+    ) -> Optional[dict[str, Any]]:
+        """Take an item back off the calendar, on request (UC43, D59).
+
+        The item is untouched: it keeps its due time, its state and its push.
+        This says only that it does not belong on a calendar — which is the
+        commonest thing to be wrong about once adding is a decision.
+
+        The event id goes into the same outbox a deleted item's does, in the
+        same transaction that forgets the link, and for the same reason (D53):
+        calling Google from here would strand the event the first time Google
+        was unreachable, with nothing left in the system that knew its id.
+
+        Dropping the row rather than flagging it is what makes this stick. The
+        tick only ever works from rows that exist, so an item with no row is
+        an item the calendar has no opinion about, however many times it is
+        edited afterwards.
+
+        Args:
+            user_id: Owner.
+            item_id: The item to take down.
+
+        Returns:
+            What happened, or None if this user has no such item. `changed` is
+            false when it was not on the calendar to begin with.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            found = await conn.execute(
+                f"""
+                SELECT l.item_id IS NOT NULL,
+                       l.google_event_id,
+                       coalesce(l.calendar_id, '')
+                  FROM {settings.db_schema}.items i
+                  LEFT JOIN {settings.db_schema}.calendar_links l
+                         ON l.item_id = i.id
+                 WHERE i.id = %s AND i.user_id = %s
+                """,
+                (item_id, user_id),
+            )
+            row = await found.fetchone()
+            if row is None:
+                return None
+            linked, event_id, calendar_id = bool(row[0]), row[1], row[2]
+            if not linked:
+                return {"changed": False, "on_calendar": False, "queued": False}
+
+            queued = bool(event_id and calendar_id)
+            if queued:
+                # `do nothing` rather than an error: the same event id can
+                # already be queued if the item was deleted and this raced it.
+                await conn.execute(
+                    f"""
+                    INSERT INTO {settings.db_schema}.calendar_deletions
+                                (user_id, google_event_id, calendar_id)
+                         VALUES (%s, %s, %s)
+                    ON CONFLICT (calendar_id, google_event_id) DO NOTHING
+                    """,
+                    (user_id, event_id, calendar_id),
+                )
+
+            await conn.execute(
+                f"""
+                DELETE FROM {settings.db_schema}.calendar_links
+                 WHERE item_id = %s
+                """,
+                (item_id,),
+            )
+
+        # `queued` is false for a row that never reached Google — there was no
+        # event, so there is nothing for the tick to take down.
+        return {"changed": True, "on_calendar": False, "queued": queued}
 
     async def has_calendar_work(self) -> bool:
         """Whether anything is waiting to be written to the calendar.
@@ -2435,7 +2555,7 @@ class Database:
             return [dict(zip(columns, row)) for row in await result.fetchall()]
 
     async def mark_calendar_synced(
-        self, item_id: str, google_event_id: str, calendar_id: str
+        self, item_id: str, google_event_id: str, calendar_id: str, user_id: str = ""
     ) -> None:
         """Record that the calendar now matches the item.
 
@@ -2443,16 +2563,24 @@ class Database:
         needed four goes to get through should not carry those four into the
         next edit, months later, and stall on the first hiccup.
 
+        **If the row has gone, the event is orphaned and goes to the outbox.**
+        Since D59 a link row can disappear while the tick is mid-write — the
+        owner presses Remove during the second Google takes to create the
+        event — and the event would then exist on a calendar with nothing left
+        in the system that knew its id. That is the exact failure the outbox
+        was built for (D53), so it is used for this too.
+
         Args:
             item_id: The item.
             google_event_id: Google's id for its event.
             calendar_id: The calendar the event is on — stored rather than
                 assumed, so that changing `GOOGLE_CALENDAR_ID` later cannot
                 orphan the events already written to the old one.
+            user_id: Owner, recorded on a deletion if one has to be queued.
         """
         pool = await self._ensure_pool()
         async with pool.connection() as conn:
-            await conn.execute(
+            synced = await conn.execute(
                 f"""
                 UPDATE {settings.db_schema}.calendar_links
                    SET google_event_id = %s,
@@ -2464,6 +2592,20 @@ class Database:
                  WHERE item_id = %s
                 """,
                 (google_event_id, calendar_id, item_id),
+            )
+            if synced.rowcount:
+                return
+
+            # Removed under us. `do nothing` because the remove itself may
+            # already have queued this event id, if it had one to queue.
+            await conn.execute(
+                f"""
+                INSERT INTO {settings.db_schema}.calendar_deletions
+                            (user_id, google_event_id, calendar_id)
+                     VALUES (%s, %s, %s)
+                ON CONFLICT (calendar_id, google_event_id) DO NOTHING
+                """,
+                (user_id or None, google_event_id, calendar_id),
             )
 
     async def mark_calendar_failed(self, item_id: str, error: str) -> None:

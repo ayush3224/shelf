@@ -9,7 +9,7 @@ under "Sessions", and move anything that changed into the "Current
 state" table above it. Keep the reasoning, not just the outcome — the
 *why* is the part that's expensive to recover.
 
-Last updated: **24 August 2026**
+Last updated: **26 August 2026**
 
 ---
 
@@ -161,7 +161,7 @@ off-site copy is still worth adding.
 
 | Area | Status |
 |---|---|
-| Schema (`shelf`, 10 tables + view) | ✅ live, migrations 001–007 applied |
+| Schema (`shelf`, 10 tables + view) | ✅ live, migrations 001–008 applied |
 | Audio bucket (`shelf-audio`, private) | ✅ created, unused |
 | API at `https://srv1531684.hstgr.cloud/api` | ✅ live on 443 |
 | systemd service, survives reboot | ✅ verified |
@@ -171,7 +171,7 @@ off-site copy is still worth adding.
 | Timezone handling (IST) | ✅ tested — "tomorrow 3pm" → 09:30Z |
 | `GET /items/today`, `POST /items/{id}/done` | ✅ live — two blocks since D56: due/overdue, and `Later` |
 | Item detail, edit, move, delete (UC37/38/21/39) | ✅ verified live |
-| Unlink a person, from item detail or the row (UC45, D58) | ⚠️ built and tested; the person-page row not yet pressed on a phone |
+| Unlink a person, from item detail or the row (UC45, D60) | ⚠️ built and tested, and it asks nothing at all since D60; the person-page row not yet pressed on a phone |
 | Scheduler tick (`shelf-tick.timer`, 1 min) | ✅ live under systemd, one log line per tick |
 | Auto-shelve on ignores/snoozes (UC18) | ✅ verified against the real DB and clock |
 | Auto-drop after 90 days (UC19) | ✅ verified by backdating real rows |
@@ -184,8 +184,8 @@ off-site copy is still worth adding.
 | Audio stored + signed playback (UC7) | ✅ verified live, byte-identical |
 | Cloud transcription (UC8) | ✅ verified live — Groq turbo, 1.6s round trip |
 | Multi-item splitting (UC4) | ⚠️ built, never run against real Haiku |
-| Mobile test suite (jest-expo) | ✅ 208 tests, incl. real-tree renders behind a 48dp inset |
-| Backend test suite | ✅ 374 tests, plus 162 opt-in `-m db` on their own schema |
+| Mobile test suite (jest-expo) | ✅ 221 tests, incl. real-tree renders behind a 48dp inset |
+| Backend test suite | ✅ 387 tests, plus 176 opt-in `-m db` on their own schema |
 | Native dep tree vs SDK 57 matrix | ✅ reconciled, `expo-doctor` 21/21 |
 | Google OAuth redirect handling | ✅ callback swallowed, not routed |
 | Google Calendar credential | ✅ service account, calendar shared to it (D52) — no OAuth flow |
@@ -202,9 +202,11 @@ off-site copy is still worth adding.
 | Weekly digest — the tick's own path (UC31) | ✅ built, claimed and sent once against live rows, push stubbed |
 | A digest notification actually on the phone | ❌ first real one due Sunday 09:00 IST |
 | Calendar write, update, delete (UC43) | ✅ verified end to end against the real calendar through the deployed tick |
-| Calendar sync is trigger-driven | ✅ migration 007; no request path calls Google |
+| Calendar is opt-in per item (UC43, D59) | ⚠️ built and tested; the buttons not yet pressed on a phone |
+| Calendar sync is trigger-driven | ✅ migrations 007–008; the trigger updates and never inserts, and no request path calls Google |
 | A future-dated item is on a screen (UC32, D56) | ✅ `Later` block, verified live against the two real captures |
 | The capture toast names where it went (D57) | ✅ Today / Later + the day / the shelf |
+| Changing a due date asks for the time too (D61) | ⚠️ built and tested; not yet used on a phone |
 | Session 5 — UC14 delivery half | ❌ not started |
 
 ## 7. Pending — immediate
@@ -2053,3 +2055,137 @@ and that a person with no aliases never reaches a dialog at all.
 **Not yet on a phone.** Same last hop as everything since session 3. The row now
 carries three targets — body, play, unlink — and whether the × is comfortably
 clear of the row body under a thumb is a thumb question, not an argument.
+
+---
+
+## Session 5d — three reversals *(26 August 2026)*
+
+Three changes, all of them the owner correcting something that was built the
+way the plan said and turned out to be wrong in use. Nothing here is new
+capability; two of them take capability away.
+
+### The calendar stopped deciding for itself (UC43, D59)
+
+UC43 shipped two days ago as "every timed item is written to the calendar",
+which is what the use case says and what the plan said. It is wrong, and the
+reason is specific to this app rather than to calendars.
+
+**Almost everything here has a time because a push needs one.** "Chase the
+invoice Thursday" occupies no part of Thursday; it is a reminder with a
+timestamp attached. A handful of things a week are genuinely appointments. Sync
+all of them and Thursday holds thirty reminders and four appointments, which
+means a glance at Thursday no longer tells you what Thursday is. The feature
+did not add the calendar to the app so much as subtract the calendar from the
+day.
+
+So adding is now an action — **Add to calendar** on item detail, **Remove from
+calendar** beside it, `POST` and `DELETE /items/{id}/calendar`.
+
+**What did not change is the interesting part.** The trigger, the outbox, the
+tick's step 8, the retry ladder, the attempts reset, the one-way rule: all of
+D53 and D8 stand untouched. None of that was ever about *whether* an item
+belongs on a calendar. It is about keeping an event that exists in step with
+the item it copies through the nine places that write to `items`, and that is
+the hard half. The change is one line of intent moved from the database to a
+button.
+
+**The row is the request** (migration 008). A `calendar_links` row used to mean
+"this item has a due time"; it now means "the owner put this item on the
+calendar". Enforcing that took removing the `insert` from
+`calendar_mark_dirty()` — it updates an existing row and never creates one — so
+the rule lives in the same place the drift detection does rather than in the
+routes. Nine writers, none of which have to remember.
+
+**The backfill was the only judgement call.** 007 queued every timed item, and
+some of those have real events on a real calendar by now. Deleting them
+silently is precisely the "things are vanishing" failure `CLAUDE.md` warns
+about, so 008 keeps every row that reached Google and deletes only the ones
+that never did — work nobody asked for, removed before the next tick does it
+anyway.
+
+**Three consequences, each of which will look like a bug once.** Editing a
+removed item does not put it back — under 007 the trigger would have inserted a
+fresh row and the event would have returned a minute after it was removed, and
+stopping that is the whole point. Completing an item spends the request, so
+reactivating it weeks later leaves it off the calendar. And pressing Add on
+something already there is a retry rather than a duplicate: it clears
+`attempts`, which nothing else does except editing the item, so the screen shows
+a **Try again** control exactly when a link has given up — by then the main
+button says Remove, and without the second one the item would be stuck
+listed-but-absent.
+
+`POST` answers 503 when no calendar is configured, rather than writing a row
+that would sit `pending` forever behind a screen saying "adding…". `DELETE`
+does not, because forgetting the owner's own row needs no Google at all.
+
+**One new race, closed rather than shrugged at.** A link row can now vanish
+while the tick is mid-write — press Remove during the second Google takes to
+create the event — and the event would sit on the calendar with nothing left
+holding its id. `mark_calendar_synced` notices its update touched no row and
+sends the event straight to the deletion outbox, which is the thing D53 built it
+for. Since the outbox is drained after the links in the same pass, the event
+that was just created usually comes back off within the same tick. There is a
+test that stages exactly that interleaving.
+
+### The alias dialog lasted two days (UC45, D60)
+
+D58 put one question in front of an unlink: emptying somebody removes them and
+discards the names they went by, and relinking restores the person but not the
+names. The argument still reads correctly. It is withdrawn anyway, by the
+owner's preference, and the reason is not a flaw in it — **the question arrives
+too often for what it protects.**
+
+The commonest unlink in this app is the one-mention false positive, which by
+definition empties somebody. Aliases accumulate on anybody mentioned twice under
+two spellings. So "the last note on a person who goes by other names" is not the
+rare case D58 assumed; it is most Tuesdays. Losing the names is worth less than
+answering a dialog every time, and that is a judgement about the owner's own
+data.
+
+Gone with it: the 409 and the `remove_person` parameter, `lib/unlinkPerson.ts`
+entirely, and `LinkedPerson.aliases` on the wire — which existed only so the
+dialog could name what it was discarding. Both screens call `removeItemPerson`
+directly again and behave identically, which they always should have.
+
+**The price is in the suite rather than in a warning.** There is a test that
+empties Priya Sharma, says "Priya" again, and asserts that a new person is
+created — because that is what the aliases were preventing, and it should be
+visible as behaviour rather than as a paragraph.
+
+D58 is left in `decisions.md` as written, with a note that its second half was
+reversed. Both directions have now been implemented and lived with, so this is
+not an open question: if the alias loss ever bites, the answer is to stop
+discarding aliases at all, not to bring the dialog back.
+
+### A date without a time was half an answer (D61)
+
+The date picker and the time picker were independent, so changing the date kept
+whatever time of day the item already had. That time came from the sentence the
+item was captured in — "Thursday at three" — and moving it to a different day is
+exactly the moment three o'clock stops applying. The old behaviour carried an
+inherited time onto a day it was never chosen for, silently.
+
+The date leg now hands over to the time leg and one edit is sent when both are
+answered. Backing out of either writes nothing: saving the date and leaving the
+time for later is the half-answer this exists to prevent, and a back-press is
+not a confirmation. One `PATCH` rather than two, because two would put the
+event on the calendar at the wrong time for up to a minute, log two `manual`
+transitions for one decision, and reschedule the push twice.
+
+### Tests
+
+221 mobile (up 13), 387 backend (up 13), 176 `-m db` (up 14) — all green, plus
+`tsc`, `ruff` and `black`. Two new mobile suites: one drives a fake picker
+through both legs and asserts the day comes from the first and the time from the
+second, one renders the calendar block through add, remove, and the stalled
+retry. On the backend, the `-m db` calendar suite is the one worth reading — it
+had eleven tests asserting the automatic behaviour, and the two that inverted
+outright (`gaining a due time queues an event`, `a reactivated item gets a fresh
+event`) now assert the opposite in the same words, which is the clearest record
+of what D59 actually changed.
+
+### Not yet on a phone
+
+The same last hop as everything since session 3, and it matters more than usual
+for the picker: a two-leg question is a sequence, and whether it reads as one
+decision or as being asked twice is not something jest can answer.
